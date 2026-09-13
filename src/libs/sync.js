@@ -7,6 +7,9 @@ import {
   KV_SALT_SHARE,
   OPT_SYNCTYPE_WEBDAV,
   OPT_SYNCTYPE_GIST,
+  STOKEY_SETTING,
+  STOKEY_RULES,
+  STOKEY_WORDS,
 } from "../config";
 import {
   getSyncWithDefault,
@@ -14,9 +17,13 @@ import {
   getSettingWithDefault,
   getRulesWithDefault,
   getWordsWithDefault,
+  getSetting,
+  getRules,
+  getWords,
   setSetting,
   setRules,
   setWords,
+  updateSyncState,
 } from "./storage";
 import {
   apiSyncData,
@@ -31,6 +38,11 @@ import { createClient, getPatcher } from "webdav";
 import { fetchPatcher } from "./fetch";
 import { kissLog } from "./log";
 import { encryptSyncValue, decryptSyncValue } from "./syncCrypto";
+import {
+  enqueueStorageSync,
+  enqueueStorageWrite,
+  findStorageState,
+} from "./storageState";
 
 let webdavRequestPatched = false;
 const GIST_SYNC_DESCRIPTION = "kiss translator sync files";
@@ -309,6 +321,8 @@ export const syncData = async (
     syncEncryptKey: syncEncryptKeyOverride,
     forceRemoteRead = false,
     persistMeta = true,
+    deferCommit = false,
+    isRequestCurrent = () => true,
   } = {}
 ) => {
   // 获取同步服务配置
@@ -320,6 +334,8 @@ export const syncData = async (
     syncEncryptKey: savedSyncEncryptKey,
     syncMeta = {},
   } = await getSyncWithDefault();
+
+  if (!isRequestCurrent()) return;
 
   const syncEncryptKey = syncEncryptKeyOverride ?? savedSyncEncryptKey;
 
@@ -333,9 +349,10 @@ export const syncData = async (
     return;
   }
 
-  let { updateAt = 0, syncAt = 0 } = syncMeta[key] || {};
+  const originalMeta = { ...(syncMeta[key] || {}) };
+  let { updateAt = 0, syncAt = 0 } = originalMeta;
   const isFirstSync = syncAt === 0;
-  if (isFirstSync) {
+  if (isFirstSync && !originalMeta.pendingUpload) {
     updateAt = 0; // 若从未同步过，将更新时间置 0 以触发首次拉取云端
   }
 
@@ -352,6 +369,8 @@ export const syncData = async (
   };
 
   const encryptedData = await encryptSyncData(data, syncEncryptKey);
+
+  if (!isRequestCurrent()) return;
 
   // 根据同步类型执行不同的同步方法
   const encryptedOrLegacyRes = await syncByType(syncType, encryptedData, args);
@@ -370,33 +389,173 @@ export const syncData = async (
     res.updateAt > updateAt ||
     (isFirstSync && res.updateAt === updateAt && res.value !== data.value);
 
-  // 新版客户端首次遇到旧版明文远端数据时，读取后立即迁移为密文。
-  if (!encrypted && !forceRemoteRead) {
-    await migratePlainSyncData(syncType, res, args, syncEncryptKey);
-  }
-
-  // 更新本地同步元数据，包含云端的最新修改时间及当前的同步操作时间
-  if (persistMeta) {
-    syncMeta[key] = {
-      updateAt: res.updateAt,
-      syncAt: Date.now(),
-    };
-    await putSync({ syncMeta });
-  }
-
-  return { value: newVal, isNew };
+  // A deferred consumer accepts the value and its metadata under one guard.
+  // Never hold this metadata queue while waiting for another controller queue.
+  const commit = async ({
+    applyValue = async () => {},
+    rollbackValue,
+    isCurrent = () => true,
+    shouldRetry = () => false,
+    getRetryTimestamp = () => 0,
+  } = {}) => {
+    let accepted = false;
+    let valueApplied = false;
+    const retryState = (current) =>
+      persistMeta && shouldRetry()
+        ? {
+            ...current,
+            syncMeta: {
+              ...current.syncMeta,
+              [key]: {
+                ...current.syncMeta?.[key],
+                updateAt: Math.max(
+                  current.syncMeta?.[key]?.updateAt || 0,
+                  getRetryTimestamp()
+                ),
+                pendingUpload: true,
+              },
+            },
+          }
+        : undefined;
+    await updateSyncState(
+      async (current) => {
+        const currentMeta = current.syncMeta?.[key] || {};
+        if (
+          !isCurrent() ||
+          (currentMeta.updateAt || 0) !== (originalMeta.updateAt || 0) ||
+          (currentMeta.syncAt || 0) !== (originalMeta.syncAt || 0) ||
+          !!currentMeta.pendingUpload !== !!originalMeta.pendingUpload
+        ) {
+          return retryState(current);
+        }
+        await applyValue();
+        valueApplied = isNew;
+        if (!isCurrent()) return retryState(current);
+        accepted = true;
+        if (!persistMeta) return undefined;
+        return {
+          ...current,
+          syncMeta: {
+            ...current.syncMeta,
+            [key]: { updateAt: res.updateAt, syncAt: Date.now() },
+          },
+        };
+      },
+      {
+        onWriteError: async (error) => {
+          if (valueApplied && rollbackValue) {
+            try {
+              await rollbackValue();
+            } catch (rollbackError) {
+              error.storageRecoveryFailed = true;
+              kissLog(
+                "Unable to restore data after sync metadata failure",
+                rollbackError
+              );
+            }
+          }
+        },
+      }
+    );
+    return accepted;
+  };
+  const migrateLegacy = async () => {
+    if (encrypted || forceRemoteRead) return;
+    try {
+      await migratePlainSyncData(syncType, res, args, syncEncryptKey);
+    } catch (error) {
+      // A failed follow-up cannot undo an already committed data adoption.
+      kissLog("Unable to encrypt legacy remote sync data", key, error);
+    }
+  };
+  const result = { value: newVal, isNew };
+  if (deferCommit) return { ...result, commit, migrateLegacy };
+  if (!(await commit())) return { value, isNew: false };
+  await migrateLegacy();
+  return result;
 };
+
+function syncStoredValue(key, storageKey, read, readRaw, write, options = {}) {
+  return enqueueStorageSync(storageKey, async () => {
+    let originalState;
+    let originalEditVersion;
+    let value;
+    let result;
+    const hasNewEdit = () => {
+      const currentState = findStorageState(storageKey);
+      return (
+        (originalState && originalState.editVersion !== originalEditVersion) ||
+        (currentState && currentState !== originalState && currentState.dirty)
+      );
+    };
+    do {
+      originalState = findStorageState(storageKey);
+      originalEditVersion = originalState?.editVersion;
+      value = await enqueueStorageWrite(storageKey, read);
+      if (hasNewEdit()) continue;
+      result = await syncData(key, value, {
+        ...options,
+        deferCommit: true,
+        isRequestCurrent: () => !hasNewEdit(),
+      });
+      if (result || !hasNewEdit()) break;
+    } while (true);
+    if (!result) return result;
+    // Key rotation intentionally validates every remote file before applying any.
+    if (options.applyRemote === false && options.persistMeta === false) {
+      return { value: result.value, isNew: result.isNew };
+    }
+    let previousStoredValue;
+    const accepted = await enqueueStorageWrite(storageKey, () =>
+      result.commit({
+        applyValue: async () => {
+          if (result.isNew && options.applyRemote !== false) {
+            previousStoredValue = await readRaw();
+            await write(result.value);
+          }
+        },
+        rollbackValue: async () => {
+          // Do not roll back an unrelated edit that has already reached storage.
+          if (
+            JSON.stringify(await readRaw()) === JSON.stringify(result.value)
+          ) {
+            await write(previousStoredValue ?? null);
+          }
+        },
+        isCurrent: () => !hasNewEdit(),
+        shouldRetry: hasNewEdit,
+        getRetryTimestamp: () =>
+          Math.max(
+            originalState?.editTimestamp || 0,
+            findStorageState(storageKey)?.editTimestamp || 0
+          ),
+      })
+    );
+    const currentState = findStorageState(storageKey);
+    if (accepted && currentState && !hasNewEdit()) {
+      if (result.isNew && options.applyRemote !== false)
+        currentState.acceptValue(result.value);
+      else currentState.markSynced(currentState.revision);
+    }
+    if (accepted) await result.migrateLegacy();
+    return accepted
+      ? { value: result.value, isNew: result.isNew }
+      : { value, isNew: false };
+  });
+}
 
 /**
  * 同步用户设置 (Setting)。若云端设置更新，则覆盖本地设置。
  */
 const syncSetting = async (options) => {
-  const value = await getSettingWithDefault();
-  const res = await syncData(KV_SETTING_KEY, value, options);
-  if (res?.isNew && options?.applyRemote !== false) {
-    await setSetting(res.value);
-  }
-  return res;
+  return syncStoredValue(
+    KV_SETTING_KEY,
+    STOKEY_SETTING,
+    getSettingWithDefault,
+    getSetting,
+    setSetting,
+    options
+  );
 };
 
 /**
@@ -414,12 +573,14 @@ export const trySyncSetting = async () => {
  * 同步规则 (Rules)。若云端规则更新，则覆盖本地规则。
  */
 const syncRules = async (options) => {
-  const value = await getRulesWithDefault();
-  const res = await syncData(KV_RULES_KEY, value, options);
-  if (res?.isNew && options?.applyRemote !== false) {
-    await setRules(res.value);
-  }
-  return res;
+  return syncStoredValue(
+    KV_RULES_KEY,
+    STOKEY_RULES,
+    getRulesWithDefault,
+    getRules,
+    setRules,
+    options
+  );
 };
 
 /**
@@ -437,12 +598,14 @@ export const trySyncRules = async () => {
  * 同步生词本词汇 (Fav Words)。若云端有更新，则覆盖本地。
  */
 const syncWords = async (options) => {
-  const value = await getWordsWithDefault();
-  const res = await syncData(KV_WORDS_KEY, value, options);
-  if (res?.isNew && options?.applyRemote !== false) {
-    await setWords(res.value);
-  }
-  return res;
+  return syncStoredValue(
+    KV_WORDS_KEY,
+    STOKEY_WORDS,
+    getWordsWithDefault,
+    getWords,
+    setWords,
+    options
+  );
 };
 
 /**

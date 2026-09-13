@@ -3,6 +3,9 @@ jest.mock("../config", () => ({
   KV_SETTING_KEY: "kiss-setting_v2.json",
   KV_RULES_KEY: "kiss-rules_v2.json",
   KV_WORDS_KEY: "kiss-words.json",
+  STOKEY_SETTING: "setting",
+  STOKEY_RULES: "rules",
+  STOKEY_WORDS: "words",
   KV_RULES_SHARE_KEY: "kiss-rules-share_v2.json",
   KV_SALT_SHARE: "share-salt",
   OPT_SYNCTYPE_WEBDAV: "WebDAV",
@@ -12,9 +15,13 @@ jest.mock("../config", () => ({
 jest.mock("./storage", () => ({
   getSyncWithDefault: jest.fn(),
   putSync: jest.fn(),
+  updateSyncState: jest.fn(),
   getSettingWithDefault: jest.fn(),
   getRulesWithDefault: jest.fn(),
   getWordsWithDefault: jest.fn(),
+  getSetting: jest.fn(),
+  getRules: jest.fn(),
+  getWords: jest.fn(),
   setSetting: jest.fn(),
   setRules: jest.fn(),
   setWords: jest.fn(),
@@ -68,6 +75,7 @@ import {
   getWordsWithDefault,
   putSync,
   setSetting,
+  updateSyncState,
 } from "./storage";
 import { decryptSyncValue, encryptSyncValue } from "./syncCrypto";
 import { createClient, getPatcher } from "webdav";
@@ -80,6 +88,15 @@ const NEW_SYNC_ENCRYPT_KEY = "new-sync-encrypt-passphrase";
 const SETTING_KEY = "kiss-setting_v2.json";
 const RULES_KEY = "kiss-rules_v2.json";
 const WORDS_KEY = "kiss-words.json";
+
+beforeEach(() => {
+  updateSyncState.mockImplementation(async (updater) => {
+    const current = await getSyncWithDefault();
+    const next = await updater(current);
+    if (next !== undefined) await putSync({ syncMeta: next.syncMeta });
+    return next ?? current;
+  });
+});
 
 const gistFileContent = (value, updateAt) =>
   JSON.stringify({

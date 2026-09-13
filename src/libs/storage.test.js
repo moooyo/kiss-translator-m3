@@ -73,6 +73,63 @@ describe("settings storage migration", () => {
     expect(stored.transApis[0]).not.toHaveProperty("systemPrompt");
   });
 
+  test.each([
+    [true, "dark"],
+    [false, "light"],
+  ])(
+    "migrates boolean theme %p without changing current settings",
+    async (darkMode, expected) => {
+      const oldSetting = {
+        version: SETTINGS_VERSION_V3,
+        darkMode,
+        uiLang: "en",
+      };
+      window.localStorage.setItem(STOKEY_SETTING, JSON.stringify(oldSetting));
+
+      await runDataMigration();
+
+      expect(readStoredJson(STOKEY_SETTING)).toEqual({
+        ...oldSetting,
+        darkMode: expected,
+      });
+      expect(readStoredJson(STOKEY_SETTING_BACKUP_V1_BEFORE_V2)).toBe(null);
+    }
+  );
+
+  test("finishes schema and theme migration in one settings write", async () => {
+    const oldSetting = { version: SETTINGS_VERSION_V2, darkMode: true };
+    window.localStorage.setItem(STOKEY_SETTING, JSON.stringify(oldSetting));
+    const setItem = jest.spyOn(window.Storage.prototype, "setItem");
+    try {
+      await runDataMigration();
+
+      expect(readStoredJson(STOKEY_SETTING)).toMatchObject({
+        version: SETTINGS_VERSION_V3,
+        darkMode: "dark",
+      });
+      expect(setItem).toHaveBeenCalledTimes(1);
+      await runDataMigration();
+      expect(setItem).toHaveBeenCalledTimes(1);
+    } finally {
+      setItem.mockRestore();
+    }
+  });
+
+  test("reports a failed migration write to callers that require ready storage", async () => {
+    globalThis.GM = {
+      getValue: jest.fn(async () =>
+        JSON.stringify({ version: SETTINGS_VERSION_V3, darkMode: true })
+      ),
+      setValue: jest.fn(async () => {
+        throw new Error("migration write failed");
+      }),
+      deleteValue: jest.fn(),
+    };
+    const { runDataMigration: migrateGmData } = loadGmStorageModule();
+
+    await expect(migrateGmData()).resolves.toBe(false);
+  });
+
   test("getSettingWithDefault returns current settings for stored v1 data", async () => {
     const oldSetting = {
       uiLang: "zh",

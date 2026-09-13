@@ -28,6 +28,48 @@ import { browser } from "./browser";
 import { kissLog } from "./log";
 import { debounce } from "./utils";
 import { getGmMethod } from "./gm";
+import { publishStorageWrite } from "./storageEvents";
+
+let syncWriteQueue = Promise.resolve();
+
+/** Serialize sync configuration and metadata read/modify/write operations. */
+export function updateSyncState(updater, { onWriteError } = {}) {
+  const pending = syncWriteQueue.then(async () => {
+    const current = (await getObj(STOKEY_SYNC)) ?? DEFAULT_SYNC;
+    const next = await updater(current);
+    if (next === undefined) return current;
+    try {
+      await set(STOKEY_SYNC, JSON.stringify(next));
+    } catch (error) {
+      // Compensation stays inside this same commit boundary.
+      await onWriteError?.(error);
+      throw error;
+    }
+    publishStorageWrite(STOKEY_SYNC, next, true);
+    return next;
+  });
+  syncWriteQueue = pending.catch(() => {});
+  return pending;
+}
+
+function preserveNewerSyncMeta(current, incoming) {
+  const merged = { ...current, ...incoming };
+  Object.entries(current || {}).forEach(([key, meta]) => {
+    const next = incoming?.[key];
+    if (
+      !next ||
+      meta.updateAt > next.updateAt ||
+      (meta.updateAt === next.updateAt &&
+        (meta.syncAt > next.syncAt ||
+          (meta.syncAt === next.syncAt &&
+            meta.pendingUpload &&
+            !next.pendingUpload)))
+    ) {
+      merged[key] = meta;
+    }
+  });
+  return merged;
+}
 
 /**
  * 获取适用于当前环境的 GM (Greasemonkey) 存储引擎方法集合。
@@ -99,7 +141,15 @@ async function del(key) {
  * @param {Object|Array} obj 待存入 of JS 对象或数组
  */
 async function setObj(key, obj) {
+  if (key === STOKEY_SYNC) {
+    await updateSyncState((current) => ({
+      ...obj,
+      syncMeta: preserveNewerSyncMeta(current.syncMeta, obj?.syncMeta),
+    }));
+    return;
+  }
   await set(key, JSON.stringify(obj));
+  publishStorageWrite(key, obj);
 }
 
 /**
@@ -188,17 +238,34 @@ export const migrateStoredSettingToV2 = async (
   return migrateSettingPromptsToV2(setting);
 };
 
+/** Return false if migration cannot persist settings; reads still reject. */
 export const runDataMigration = async () => {
   const rawSetting = await getSetting();
-  if (rawSetting && getSettingVersion(rawSetting) < CURRENT_SETTINGS_VERSION) {
-    try {
+  if (!rawSetting) return true;
+
+  const needsSchemaMigration =
+    getSettingVersion(rawSetting) < CURRENT_SETTINGS_VERSION;
+  const needsThemeMigration = typeof rawSetting.darkMode === "boolean";
+  if (!needsSchemaMigration && !needsThemeMigration) return true;
+
+  try {
+    let nextSetting = rawSetting;
+    if (needsSchemaMigration) {
       const v2Setting = await migrateStoredSettingToV2(rawSetting, rawSetting);
-      const nextSetting = migrateSettingToV3(v2Setting);
-      await setObj(STOKEY_SETTING, nextSetting);
-      kissLog(`Migration to V${CURRENT_SETTINGS_VERSION} completed.`);
-    } catch (err) {
-      kissLog(`Data migration to V${CURRENT_SETTINGS_VERSION} failed:`, err);
+      nextSetting = migrateSettingToV3(v2Setting);
     }
+    if (needsThemeMigration) {
+      nextSetting = {
+        ...nextSetting,
+        darkMode: rawSetting.darkMode ? "dark" : "light",
+      };
+    }
+    await setObj(STOKEY_SETTING, nextSetting);
+    kissLog(`Migration to V${CURRENT_SETTINGS_VERSION} completed.`);
+    return true;
+  } catch (err) {
+    kissLog(`Data migration to V${CURRENT_SETTINGS_VERSION} failed:`, err);
+    return false;
   }
 };
 
@@ -303,11 +370,31 @@ export const debouncePutTranBox = debounce(putTranBox, 300);
 // --- 云同步元数据 (Sync Settings & Timestamps) 存取 ---
 export const getSync = () => getObj(STOKEY_SYNC);
 export const getSyncWithDefault = async () => (await getSync()) || DEFAULT_SYNC;
-export const putSync = (obj) => putObj(STOKEY_SYNC, obj);
-export const putSyncMeta = async (key) => {
-  const { syncMeta = {} } = await getSyncWithDefault();
-  syncMeta[key] = { ...(syncMeta[key] || {}), updateAt: Date.now() };
-  await putSync({ syncMeta });
+export const putSync = (obj) =>
+  updateSyncState((current) => ({
+    ...current,
+    ...obj,
+    ...(obj.syncMeta
+      ? {
+          syncMeta: preserveNewerSyncMeta(current.syncMeta, obj.syncMeta),
+        }
+      : {}),
+  }));
+export const putSyncMeta = (key) => {
+  const updateAt = Date.now();
+  return updateSyncState((current) => ({
+    ...current,
+    syncMeta: {
+      ...current.syncMeta,
+      [key]: {
+        ...current.syncMeta?.[key],
+        updateAt: Math.max(
+          updateAt,
+          (current.syncMeta?.[key]?.updateAt || 0) + 1
+        ),
+      },
+    },
+  }));
 };
 // 节流处理同步时间元数据的更新
 export const debounceSyncMeta = debounce(putSyncMeta, 300);

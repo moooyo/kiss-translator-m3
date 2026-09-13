@@ -16,7 +16,7 @@ import { EVENT_FAVORITE_WORD_CHANGE } from "../../config";
  */
 export default function FavBtn({ word, title }) {
   // Read favorite words and the toggle action from useFavWords.
-  const { favWords, toggleFav } = useFavWords();
+  const { favWords, toggleFav, isLoading } = useFavWords();
   const { context, setting } = useSetting();
   const [loading, setLoading] = useState(false);
   const isFavorite = Boolean(favWords[word]);
@@ -25,6 +25,7 @@ export default function FavBtn({ word, title }) {
 
   // Toggle the favorite state on click.
   const handleClick = useCallback(() => {
+    if (isLoading) return;
     try {
       setLoading(true);
       // REVIEW: If toggleFav is asynchronous, finally clears loading before it completes.
@@ -41,17 +42,17 @@ export default function FavBtn({ word, title }) {
     } finally {
       setLoading(false);
     }
-  }, [favWords, toggleFav, word]);
+  }, [favWords, toggleFav, word, isLoading]);
 
   useEffect(() => {
-    if (autoCollect && word && !favWords[word]) {
+    if (!isLoading && autoCollect && word && !favWords[word]) {
       handleClick();
     }
-  }, [autoCollect, favWords, handleClick, word]);
+  }, [autoCollect, favWords, handleClick, word, isLoading]);
 
   return (
     <IconButton
-      disabled={loading}
+      disabled={loading || isLoading}
       size="small"
       onClick={handleClick}
       title={title}
