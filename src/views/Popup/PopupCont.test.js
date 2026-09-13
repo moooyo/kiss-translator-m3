@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import PopupCont from "./PopupCont";
 import { getVisibleServices } from "./services";
 import { tryClearCaches } from "../../libs/cache";
+import { getCurTab } from "../../libs/msg";
 import {
   MSG_MOUSEHOVER_TOGGLE,
   MSG_RULE_EDITOR,
@@ -81,6 +82,10 @@ async function flushEffects() {
   });
 }
 
+function openAdvancedOptions(container) {
+  act(() => container.querySelector(".kt-popup-disclosure").click());
+}
+
 function renderPopupCont(props = {}, { statefulRule = false } = {}) {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -151,6 +156,8 @@ function renderPopupCont(props = {}, { statefulRule = false } = {}) {
 describe("PopupCont capability parity", () => {
   beforeEach(() => {
     mockIsExt = false;
+    getCurTab.mockReset();
+    getCurTab.mockResolvedValue({ url: "https://example.com/page" });
     tryClearCaches.mockReset();
     tryClearCaches.mockResolvedValue(true);
     mockSendBgMsg.mockReset();
@@ -168,6 +175,79 @@ describe("PopupCont capability parity", () => {
     document.body.innerHTML = "";
   });
 
+  test("keeps site actions available while scene controls and tools are collapsed", async () => {
+    const view = renderPopupCont();
+    try {
+      await flushEffects();
+      const disclosure = view.container.querySelector(".kt-popup-disclosure");
+      const advancedPanel = document.getElementById(
+        disclosure.getAttribute("aria-controls")
+      );
+      const site = view.container.querySelector(".kt-popup-site");
+
+      expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+      expect(advancedPanel.hidden).toBe(true);
+      expect(advancedPanel.querySelector("button")).toBeNull();
+      expect(
+        Array.from(site.querySelectorAll("button")).map(
+          (button) => button.textContent
+        )
+      ).toEqual(["save_rule", "add_to_blacklist"]);
+      expect(site.querySelector("select").title).toBe(
+        site.querySelector("select").value
+      );
+
+      openAdvancedOptions(view.container);
+
+      expect(disclosure.getAttribute("aria-expanded")).toBe("true");
+      expect(advancedPanel.hidden).toBe(false);
+      expect(advancedPanel.querySelectorAll(".kt-popup-scene")).toHaveLength(3);
+      expect(
+        Array.from(
+          advancedPanel.querySelectorAll(".kt-popup-advanced-tools button")
+        ).map((button) => button.textContent)
+      ).toEqual(["rule_editor_open", "clear_cache"]);
+
+      disclosure.focus();
+      act(() => disclosure.click());
+
+      expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+      expect(advancedPanel.hidden).toBe(true);
+      expect(advancedPanel.querySelector("button")).toBeNull();
+      expect(document.activeElement).toBe(disclosure);
+    } finally {
+      view.cleanup();
+    }
+  });
+
+  test("keeps cache clearing available without a site domain", async () => {
+    getCurTab.mockResolvedValueOnce({ url: "" });
+    const view = renderPopupCont();
+    try {
+      await flushEffects();
+      const siteButtons = view.container.querySelectorAll(
+        ".kt-popup-site__actions button"
+      );
+      expect(siteButtons).toHaveLength(2);
+      siteButtons.forEach((button) => expect(button.disabled).toBe(true));
+
+      openAdvancedOptions(view.container);
+      const clearCache = view.container.querySelector(
+        'button[aria-label="clear_cache"]'
+      );
+      expect(clearCache.disabled).toBe(false);
+
+      await act(async () => clearCache.click());
+
+      expect(tryClearCaches).toHaveBeenCalledTimes(1);
+      expect(
+        view.container.querySelector('[role="alert"]').textContent
+      ).toContain("clear_success");
+    } finally {
+      view.cleanup();
+    }
+  });
+
   test("opens the rule editor from the content popup without closing the page", async () => {
     const processActions = jest.fn();
     const closeWindow = jest
@@ -176,6 +256,7 @@ describe("PopupCont capability parity", () => {
     const view = renderPopupCont({ processActions, isContent: true });
     try {
       await flushEffects();
+      openAdvancedOptions(view.container);
       const openEditor = Array.from(
         view.container.querySelectorAll("button")
       ).find((button) => button.textContent === "rule_editor_open");
@@ -203,6 +284,7 @@ describe("PopupCont capability parity", () => {
     const view = renderPopupCont();
     try {
       await flushEffects();
+      openAdvancedOptions(view.container);
       const openEditor = Array.from(
         view.container.querySelectorAll("button")
       ).find((button) => button.textContent === "rule_editor_open");
@@ -415,6 +497,7 @@ describe("PopupCont capability parity", () => {
     );
     const view = renderPopupCont();
     await flushEffects();
+    openAdvancedOptions(view.container);
     const clearCache = view.container.querySelector(
       'button[aria-label="clear_cache"]'
     );
@@ -435,6 +518,7 @@ describe("PopupCont capability parity", () => {
     tryClearCaches.mockResolvedValueOnce(false);
     const view = renderPopupCont();
     await flushEffects();
+    openAdvancedOptions(view.container);
     const clearCache = view.container.querySelector(
       'button[aria-label="clear_cache"]'
     );
@@ -450,6 +534,7 @@ describe("PopupCont capability parity", () => {
   test("restarts Snackbar timing for consecutive messages", async () => {
     const view = renderPopupCont();
     await flushEffects();
+    openAdvancedOptions(view.container);
     const clearCache = view.container.querySelector(
       'button[aria-label="clear_cache"]'
     );
@@ -514,6 +599,7 @@ describe("PopupCont capability parity", () => {
   test("keeps runtime-dependent subtitle control outside the Popup-only scope", async () => {
     const view = renderPopupCont();
     await flushEffects();
+    openAdvancedOptions(view.container);
 
     const featureLabelNodes = Array.from(
       view.container.querySelectorAll(".kt-popup-scene__label")
@@ -812,6 +898,7 @@ describe("PopupCont capability parity", () => {
     const setSetting = jest.fn();
     const view = renderPopupCont({ processActions, setSetting });
     await flushEffects();
+    openAdvancedOptions(view.container);
 
     const selectionScene = view.container.querySelector(
       '.kt-popup-scene[aria-pressed="true"]'
@@ -831,6 +918,7 @@ describe("PopupCont capability parity", () => {
     const setSetting = jest.fn();
     const view = renderPopupCont({ setSetting });
     await flushEffects();
+    openAdvancedOptions(view.container);
 
     const hoverScene = Array.from(
       view.container.querySelectorAll(".kt-popup-scene")
