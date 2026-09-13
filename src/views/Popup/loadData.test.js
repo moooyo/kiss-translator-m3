@@ -1,5 +1,10 @@
 const mockSendTopFrameMsg = jest.fn();
 const mockSendTabMsg = jest.fn();
+const mockIsCurrentPopupDocument = jest.fn();
+
+jest.mock("../../libs/popupDocument", () => ({
+  isCurrentPopupDocument: (...args) => mockIsCurrentPopupDocument(...args),
+}));
 
 jest.mock("../../libs/msg", () => ({
   sendTopFrameMsg: (...args) => mockSendTopFrameMsg(...args),
@@ -7,7 +12,7 @@ jest.mock("../../libs/msg", () => ({
 }));
 
 const { MSG_TRANS_GETRULE } = require("../../config");
-const { loadPopupData } = require("./loadData");
+const { loadPopupData, queryPopupData } = require("./loadData");
 
 const popupData = {
   rule: { transOpen: "false" },
@@ -19,6 +24,7 @@ describe("loadPopupData", () => {
   beforeEach(() => {
     mockSendTopFrameMsg.mockReset();
     mockSendTabMsg.mockReset();
+    mockIsCurrentPopupDocument.mockReset().mockResolvedValue(true);
   });
 
   test("loads data from the top frame", async () => {
@@ -131,5 +137,57 @@ describe("loadPopupData", () => {
       undefined,
       42
     );
+  });
+
+  test("rejects complete snapshots from replaced or unverifiable documents", async () => {
+    mockSendTopFrameMsg.mockResolvedValue(popupData);
+    mockIsCurrentPopupDocument.mockResolvedValue(false);
+    await expect(
+      loadPopupData({ tabId: 17, wait: jest.fn() })
+    ).resolves.toBeUndefined();
+    expect(mockSendTopFrameMsg).toHaveBeenCalledTimes(2);
+  });
+
+  test("verifies the child that provided a fallback response", async () => {
+    const document = { token: "child-document", frameId: 7 };
+    const childData = { ...popupData, document, isTopFrame: false };
+    mockSendTopFrameMsg.mockResolvedValue(undefined);
+    mockSendTabMsg.mockResolvedValue(childData);
+    await expect(loadPopupData({ tabId: 17, wait: jest.fn() })).resolves.toBe(
+      childData
+    );
+    expect(mockIsCurrentPopupDocument).toHaveBeenCalledWith(17, document);
+  });
+
+  test("confirms an action only against its captured document and frame", async () => {
+    const document = { token: "captured-document", frameId: 7 };
+    const response = { ...popupData, document, isTopFrame: false };
+    mockSendTabMsg.mockResolvedValue(response);
+    await expect(queryPopupData(17, document)).resolves.toBe(response);
+    expect(mockSendTabMsg).toHaveBeenCalledWith(
+      MSG_TRANS_GETRULE,
+      undefined,
+      { frameId: 7 },
+      17,
+      "captured-document"
+    );
+    expect(mockSendTopFrameMsg).not.toHaveBeenCalled();
+    mockSendTabMsg.mockResolvedValue({
+      ...response,
+      document: { ...document, token: "replacement" },
+    });
+    await expect(queryPopupData(17, document)).resolves.toBeUndefined();
+  });
+
+  test("invalidates a replaced receiver while preserving ordinary action errors", async () => {
+    const document = { token: "old", frameId: 7 };
+    mockSendTabMsg.mockResolvedValue({
+      error: "Document changed",
+      code: "STALE_DOCUMENT",
+    });
+    await expect(queryPopupData(17, document)).resolves.toBeUndefined();
+    const paused = { error: "The rule editor is open" };
+    mockSendTabMsg.mockResolvedValue(paused);
+    await expect(queryPopupData(17, document)).resolves.toBe(paused);
   });
 });

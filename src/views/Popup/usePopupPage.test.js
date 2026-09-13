@@ -4,6 +4,7 @@ import { browser } from "../../libs/browser";
 import { getCurTab } from "../../libs/msg";
 import { loadPopupData } from "./loadData";
 import { usePopupPage } from "./usePopupPage";
+import { isCurrentPopupDocument } from "../../libs/popupDocument";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -40,6 +41,9 @@ jest.mock("../../libs/browser", () => {
 jest.mock("../../libs/msg", () => ({ getCurTab: jest.fn() }));
 jest.mock("../../libs/log", () => ({ kissLog: jest.fn() }));
 jest.mock("./loadData", () => ({ loadPopupData: jest.fn() }));
+jest.mock("../../libs/popupDocument", () => ({
+  isCurrentPopupDocument: jest.fn(),
+}));
 
 const tab = (id = 17, changes = {}) => ({
   id,
@@ -105,6 +109,7 @@ describe("usePopupPage tab lifecycle", () => {
     getCurTab.mockReset().mockResolvedValue(tab());
     loadPopupData.mockReset().mockResolvedValue(data());
     browser.tabs.get.mockReset();
+    isCurrentPopupDocument.mockReset().mockResolvedValue(true);
     for (const name of ["onUpdated", "onRemoved", "onActivated"]) {
       browser.tabs[name].clear();
     }
@@ -192,24 +197,25 @@ describe("usePopupPage tab lifecycle", () => {
     expect(view.page.isLoading).toBe(false);
   });
 
-  test("waits for navigation to complete before querying the new document", async () => {
+  test("loads a verified current runtime before background resources finish", async () => {
     getCurTab.mockResolvedValue(tab(17, { status: "loading" }));
     const view = renderPage();
     await flushEffects();
-    expect(loadPopupData).not.toHaveBeenCalled();
-    expect(view.page.isLoading).toBe(true);
+    expect(loadPopupData).toHaveBeenCalledTimes(1);
+    expect(view.page.data).toEqual(data());
+    expect(view.page.isLoading).toBe(false);
 
     updateTab({ url: "https://example.com/new", status: "loading" });
     await flushEffects();
-    expect(loadPopupData).not.toHaveBeenCalled();
-    expect(view.page.data).toBeNull();
+    expect(loadPopupData).toHaveBeenCalledTimes(2);
+    expect(view.page.data).toEqual(data());
 
     updateTab(
       { status: "complete" },
       tab(17, { url: "https://example.com/new" })
     );
     await flushEffects();
-    expect(loadPopupData).toHaveBeenCalledTimes(1);
+    expect(loadPopupData).toHaveBeenCalledTimes(3);
     expect(loadPopupData).toHaveBeenCalledWith({ tabId: 17 });
     expect(view.page.data).toEqual(data());
     expect(view.page.isLoading).toBe(false);
@@ -219,6 +225,7 @@ describe("usePopupPage tab lifecycle", () => {
     const pending = deferred();
     loadPopupData
       .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce(undefined)
       .mockResolvedValue(data("fr"));
     const view = renderPage();
     await flushEffects();
@@ -228,7 +235,7 @@ describe("usePopupPage tab lifecycle", () => {
     await flushEffects();
     expect(view.page.data).toBeNull();
     expect(view.page.isLoading).toBe(true);
-    expect(loadPopupData).toHaveBeenCalledTimes(1);
+    expect(loadPopupData).toHaveBeenCalledTimes(2);
 
     updateTab(
       { status: "complete" },
@@ -350,6 +357,82 @@ describe("usePopupPage tab lifecycle", () => {
     expect(view.page.tab.id).toBe(41);
     expect(view.page.data).toEqual(data());
     expect(loadPopupData).toHaveBeenLastCalledWith({ tabId: 41 });
+  });
+
+  test("retries initialization while resources are loading", async () => {
+    jest.useFakeTimers();
+    try {
+      getCurTab.mockResolvedValue(tab(17, { status: "loading" }));
+      loadPopupData
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValue(data("fr"));
+      const view = renderPage();
+      await flushEffects();
+      expect(view.page.data).toBeNull();
+      expect(view.page.isLoading).toBe(true);
+      act(() => jest.advanceTimersByTime(250));
+      await flushEffects();
+      expect(view.page.data.rule.toLang).toBe("fr");
+      expect(view.page.isLoading).toBe(false);
+      view.unmount();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("changes generation when a loading same-URL document is replaced", async () => {
+    jest.useFakeTimers();
+    try {
+      getCurTab.mockResolvedValue(tab(17, { status: "loading" }));
+      loadPopupData
+        .mockResolvedValueOnce({
+          ...data("en"),
+          document: { token: "old", frameId: 0 },
+        })
+        .mockResolvedValue({
+          ...data("fr"),
+          document: { token: "new", frameId: 0 },
+        });
+      const view = renderPage();
+      await flushEffects();
+      const previous = view.page;
+      isCurrentPopupDocument.mockResolvedValueOnce(false);
+      act(() => jest.advanceTimersByTime(250));
+      await flushEffects();
+      expect(view.page.generation).toBeGreaterThan(previous.generation);
+      expect(view.page.data.rule.toLang).toBe("fr");
+      act(() => previous.setRule({ toLang: "stale" }));
+      expect(view.page.data.rule.toLang).toBe("fr");
+      view.unmount();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("finishing resources preserves edits and generation for the same document", async () => {
+    jest.useFakeTimers();
+    try {
+      getCurTab.mockResolvedValue(tab(17, { status: "loading" }));
+      loadPopupData.mockResolvedValue({
+        ...data(),
+        document: { token: "current", frameId: 0 },
+      });
+      const view = renderPage();
+      await flushEffects();
+      const generation = view.page.generation;
+      act(() => view.page.setRule((rule) => ({ ...rule, toLang: "de" })));
+      updateTab({ status: "complete" });
+      await flushEffects();
+      expect(view.page.generation).toBe(generation);
+      expect(view.page.data.rule.toLang).toBe("de");
+      act(() => jest.advanceTimersByTime(500));
+      await flushEffects();
+      expect(loadPopupData).toHaveBeenCalledTimes(1);
+      expect(isCurrentPopupDocument).toHaveBeenCalledTimes(1);
+      view.unmount();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test("releases listeners on close and captures a new tab when reopened", async () => {

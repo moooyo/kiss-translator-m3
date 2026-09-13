@@ -85,6 +85,8 @@ export default function PopupCont({
   handleOpenSetting,
   processActions,
   targetTab,
+  documentInfo,
+  isVisible = true,
   onPageUnavailable,
   capabilities,
   isTopFrame = true,
@@ -116,6 +118,7 @@ export default function PopupCont({
   const snackbarSequenceRef = useRef(0);
   const ruleRef = useRef(rule);
   const activeRef = useRef(true);
+  const visibleRef = useRef(isVisible);
   const pageActionSequenceRef = useRef(0);
   const canTranslatePage = capabilities?.pageTranslation !== false;
   const canEditRule = isTopFrame && capabilities?.ruleEditor !== false;
@@ -149,6 +152,9 @@ export default function PopupCont({
   useLayoutEffect(() => {
     ruleRef.current = rule;
   }, [rule]);
+  useLayoutEffect(() => {
+    visibleRef.current = isVisible;
+  }, [isVisible]);
 
   const blacklistValue = contextSetting?.blacklist || "";
   const isInCurrentBlacklist = useMemo(() => {
@@ -186,7 +192,9 @@ export default function PopupCont({
     (action, args, topFrame = false) => {
       if (targetTab?.id !== undefined) {
         return topFrame
-          ? sendTopFrameMsg(action, args, targetTab.id)
+          ? documentInfo?.frameId === 0
+            ? sendTopFrameMsg(action, args, targetTab.id, documentInfo.token)
+            : sendTopFrameMsg(action, args, targetTab.id)
           : sendTabMsg(action, args, undefined, targetTab.id);
       }
       return topFrame
@@ -195,7 +203,7 @@ export default function PopupCont({
           : sendTopFrameMsg(action, args)
         : sendTabMsg(action, args);
     },
-    [targetTab?.id]
+    [targetTab?.id, documentInfo]
   );
 
   const dispatchPageAction = useCallback(
@@ -210,14 +218,20 @@ export default function PopupCont({
       if (topFrame && result?.error) throw new Error(result.error);
       // Broadcast responses can come from any frame. Read the preferred
       // frame again before confirming the state shown in this panel.
-      const response = await queryPopupData(targetTab?.id);
+      const response = await queryPopupData(targetTab?.id, documentInfo);
       if (response == null && sequence === pageActionSequenceRef.current) {
         onPageUnavailable?.();
       }
       if (response?.error) throw new Error(response.error);
       return response;
     },
-    [onPageUnavailable, processActions, sendPageMessage, targetTab?.id]
+    [
+      onPageUnavailable,
+      processActions,
+      sendPageMessage,
+      targetTab?.id,
+      documentInfo,
+    ]
   );
 
   const reportActionFailure = useCallback(
@@ -362,7 +376,7 @@ export default function PopupCont({
       const response = processActions
         ? await processActions({ action: MSG_RULE_EDITOR })
         : await sendPageMessage(MSG_RULE_EDITOR, undefined, true);
-      if (!activeRef.current) return;
+      if (!activeRef.current || !visibleRef.current) return;
       if (
         response?.error ||
         (!(processActions && response === undefined) &&

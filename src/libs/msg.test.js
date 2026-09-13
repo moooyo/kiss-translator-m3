@@ -59,4 +59,22 @@ describe("tab messaging targets", () => {
       { frameId: 0 }
     );
   });
+
+  test("carries a document guard only when requested by a frame-specific caller", async () => {
+    await sendTopFrameMsg("edit", undefined, 17, "captured-document");
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      17,
+      {
+        action: "edit",
+        args: undefined,
+        expectedDocumentToken: "captured-document",
+      },
+      { frameId: 0 }
+    );
+    mockSendMessage.mockClear();
+    await sendTabMsg("toggle", { enabled: true }, undefined, 17);
+    expect(mockSendMessage.mock.calls[0][1]).not.toHaveProperty(
+      "expectedDocumentToken"
+    );
+  });
 });

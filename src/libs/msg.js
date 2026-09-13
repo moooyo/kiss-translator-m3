@@ -40,14 +40,23 @@ export const sendBgMsg = (action, args) =>
  * @param {number} targetTabId The tab whose state initiated this operation.
  * @returns {Promise<*>} Content-script response.
  */
-export const sendTabMsg = async (action, args, options, targetTabId) => {
+export const sendTabMsg = async (
+  action,
+  args,
+  options,
+  targetTabId,
+  expectedDocumentToken
+) => {
   const tabId = targetTabId ?? (await getCurTabId());
   if (tabId == null) return;
 
   // 向指定 ID 的标签页发送消息，并捕获常见的由于注入未就绪产生的错误
+  const message = { action, args };
+  if (expectedDocumentToken)
+    message.expectedDocumentToken = expectedDocumentToken;
   const sendPromise = options
-    ? browser.tabs.sendMessage(tabId, { action, args }, options)
-    : browser.tabs.sendMessage(tabId, { action, args });
+    ? browser.tabs.sendMessage(tabId, message, options)
+    : browser.tabs.sendMessage(tabId, message);
   return sendPromise.catch((err) => {
     // REVIEW: 屏蔽两种常见的无害通信错误：
     // 1. "Could not establish connection" (多发于前台 content script 尚未加载完毕或无响应)
@@ -73,5 +82,10 @@ export const sendTabMsg = async (action, args, options, targetTabId) => {
  * @param {number} targetTabId Explicit target, or the active tab when omitted.
  * @returns {Promise<*>} Top-frame response.
  */
-export const sendTopFrameMsg = (action, args, targetTabId) =>
-  sendTabMsg(action, args, { frameId: 0 }, targetTabId);
+export const sendTopFrameMsg = (
+  action,
+  args,
+  targetTabId,
+  expectedDocumentToken
+) =>
+  sendTabMsg(action, args, { frameId: 0 }, targetTabId, expectedDocumentToken);

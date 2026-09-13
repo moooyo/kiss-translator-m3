@@ -3,6 +3,7 @@ import { browser } from "../../libs/browser";
 import { getCurTab } from "../../libs/msg";
 import { kissLog } from "../../libs/log";
 import { loadPopupData } from "./loadData";
+import { isCurrentPopupDocument } from "../../libs/popupDocument";
 
 /** Keep page data and edits attached to the tab captured by this popup. */
 export function usePopupPage({ enabled = true, initialData = null } = {}) {
@@ -21,10 +22,16 @@ export function usePopupPage({ enabled = true, initialData = null } = {}) {
     let targetWindowId;
     let pendingTabRead = false;
     let tabEventsDuringRead = false;
+    let retryTimer;
+    let currentDocument;
+    let documentGeneration;
     const advanceGeneration = () => ++generationRef.current;
 
     const invalidate = (tab, isLoading) => {
       const generation = advanceGeneration();
+      window.clearTimeout(retryTimer);
+      currentDocument = null;
+      documentGeneration = undefined;
       pendingTabRead = false;
       tabEventsDuringRead = false;
       targetTab = tab;
@@ -32,16 +39,48 @@ export function usePopupPage({ enabled = true, initialData = null } = {}) {
       return generation;
     };
 
+    const watchDocument = async (tab, generation, documentInfo) => {
+      const current = await isCurrentPopupDocument(tab.id, documentInfo);
+      if (!active || generation !== generationRef.current) return;
+      if (targetTab?.status !== "loading") return;
+      if (current) {
+        retryTimer = window.setTimeout(
+          () => void watchDocument(tab, generation, documentInfo),
+          250
+        );
+      } else {
+        void load(tab, invalidate(tab, true));
+      }
+    };
+
     const load = async (tab, generation) => {
       try {
         const data = await loadPopupData({ tabId: tab.id });
         if (!active || generation !== generationRef.current) return;
+        const available = data?.rule && data?.setting && !data.error;
+        const waiting = !available && tab.status === "loading";
+        if (available) {
+          currentDocument = data.document;
+          documentGeneration = generation;
+        }
         setPage({
           generation,
           tab,
-          data: data?.rule && data?.setting && !data.error ? data : null,
-          isLoading: false,
+          data: available ? data : null,
+          isLoading: waiting,
         });
+        if (waiting) {
+          // A committed document can initialize its runtime before its images
+          // and child frames finish. Retry verified reads during that interval.
+          retryTimer = window.setTimeout(() => void load(tab, generation), 250);
+        } else if (available && tab.status === "loading" && data.document) {
+          // Keep checking identity, not rule values: background resources may
+          // still be loading, and a same-URL navigation need not change tab.url.
+          retryTimer = window.setTimeout(
+            () => void watchDocument(tab, generation, data.document),
+            250
+          );
+        }
       } catch (error) {
         kissLog("load popup page", error);
         if (active && generation === generationRef.current) {
@@ -70,8 +109,7 @@ export function usePopupPage({ enabled = true, initialData = null } = {}) {
         targetTab = tab;
         targetWindowId = tab.windowId;
         setPage({ generation, tab, data: null, isLoading: true });
-        // A loading document may still respond through its old content script.
-        if (tab.status !== "loading") void load(tab, generation);
+        void load(tab, generation);
       } catch (error) {
         kissLog("get popup target tab", error);
         if (active && generation === generationRef.current) {
@@ -87,13 +125,31 @@ export function usePopupPage({ enabled = true, initialData = null } = {}) {
       return true;
     };
 
-    const handleUpdated = (tabId, changeInfo, tab) => {
+    const handleUpdated = async (tabId, changeInfo, tab) => {
       if (invalidateInitialRead()) return;
       if (tabId !== targetTab?.id) return;
       if (!changeInfo.url && !changeInfo.status) return;
       const nextTab = { ...targetTab, ...tab, ...changeInfo, id: tabId };
+      if (
+        changeInfo.status === "complete" &&
+        nextTab.url === targetTab.url &&
+        currentDocument &&
+        documentGeneration === generationRef.current
+      ) {
+        const generation = generationRef.current;
+        const current = await isCurrentPopupDocument(tabId, currentDocument);
+        if (!active || generation !== generationRef.current) return;
+        if (current) {
+          // Finishing a slow image is not a new page. Preserve pending actions,
+          // expanded controls, and optimistic edits for the same document.
+          targetTab = nextTab;
+          window.clearTimeout(retryTimer);
+          setPage((previous) => ({ ...previous, tab: nextTab }));
+          return;
+        }
+      }
       const generation = invalidate(nextTab, true);
-      if (nextTab.status !== "loading") void load(nextTab, generation);
+      void load(nextTab, generation);
     };
     const handleRemoved = (tabId) => {
       if (invalidateInitialRead()) return;
@@ -112,6 +168,7 @@ export function usePopupPage({ enabled = true, initialData = null } = {}) {
     void selectTab(getCurTab);
     return () => {
       active = false;
+      window.clearTimeout(retryTimer);
       advanceGeneration();
       browser?.tabs?.onUpdated?.removeListener?.(handleUpdated);
       browser?.tabs?.onRemoved?.removeListener?.(handleRemoved);

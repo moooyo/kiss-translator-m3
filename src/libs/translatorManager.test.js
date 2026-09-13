@@ -7,6 +7,13 @@ const mockPopupInstances = [];
 const mockFabInstances = [];
 const activeManagers = [];
 
+jest.mock("./popupDocument", () => ({
+  getPopupDocumentIdentity: () => ({
+    token: "current-document",
+    url: "https://example.com/page",
+  }),
+}));
+
 jest.mock("./ruleEditorManager", () => ({
   RuleEditorManager: class {
     destroy = jest.fn();
@@ -41,6 +48,7 @@ jest.mock("../config", () => ({
 jest.mock("./browser", () => ({
   browser: {
     runtime: {
+      sendMessage: jest.fn(),
       onMessage: {
         addListener: jest.fn(),
         removeListener: jest.fn(),
@@ -559,6 +567,11 @@ describe("TranslatorManager SPA lifecycle", () => {
         ruleEditor: true,
       },
       isTopFrame: true,
+      document: {
+        token: "current-document",
+        url: "https://example.com/page",
+        frameId: 0,
+      },
     });
     expect(response.setting.uiLang).toBe("en");
     expect(response.setting.tranboxSetting.transOpen).toBe(false);
@@ -716,9 +729,11 @@ describe("TranslatorManager SPA lifecycle", () => {
     },
   ])(
     "reports the modules available in $name",
-    ({ options, capabilities, isTopFrame }) => {
+    async ({ options, capabilities, isTopFrame }) => {
+      browser.runtime.sendMessage.mockResolvedValue(12);
       const manager = createManager(options);
       manager.start();
+      await flushMutationObserver();
 
       expect(sendRuntimeMessage({ action: "trans-getrule" })).toEqual(
         expect.objectContaining({ capabilities, isTopFrame })
@@ -839,6 +854,81 @@ describe("TranslatorManager SPA lifecycle", () => {
     });
     expect(mockPopupInstances[0].hide).not.toHaveBeenCalled();
   });
+
+  test("rejects a guarded command addressed to a replaced document", () => {
+    const manager = createManager();
+    manager.start();
+    expect(
+      sendRuntimeMessage({
+        action: "trans-toggle",
+        args: { enabled: true },
+        expectedDocumentToken: "old-document",
+      })
+    ).toEqual({
+      error: "The requested document is no longer current.",
+      code: "STALE_DOCUMENT",
+    });
+    expect(mockTranslatorInstances[0].enable).not.toHaveBeenCalled();
+    expect(
+      sendRuntimeMessage({
+        action: "trans-getrule",
+        expectedDocumentToken: "current-document",
+      }).document.token
+    ).toBe("current-document");
+  });
+
+  test("uses the background's frame ID for a child document", async () => {
+    browser.runtime.sendMessage.mockResolvedValue(12);
+    const manager = createManager({ isIframe: true });
+    manager.start();
+    await flushMutationObserver();
+    expect(sendRuntimeMessage({ action: "trans-getrule" }).document).toEqual({
+      token: "current-document",
+      url: "https://example.com/page",
+      frameId: 12,
+    });
+    expect(browser.runtime.sendMessage).toHaveBeenCalledWith({
+      action: "get_frame_id",
+    });
+  });
+
+  test.each([false, true])(
+    "waits for child identity before answering a snapshot (stopped: %s)",
+    async (stopped) => {
+      let resolveFrameId;
+      browser.runtime.sendMessage.mockReturnValue(
+        new Promise((resolve) => {
+          resolveFrameId = resolve;
+        })
+      );
+      const manager = createManager({ isIframe: true });
+      manager.start();
+      const handler = browser.runtime.onMessage.addListener.mock.calls[0][0];
+      const reply = jest.fn();
+      const response = new Promise((resolve) => {
+        expect(
+          handler({ action: "trans-getrule" }, {}, (value) => {
+            reply(value);
+            resolve(value);
+          })
+        ).toBe(true);
+      });
+      expect(reply).not.toHaveBeenCalled();
+      if (stopped) manager.stop();
+      resolveFrameId(12);
+      if (stopped) {
+        await expect(response).resolves.toMatchObject({
+          code: "STALE_DOCUMENT",
+        });
+      } else {
+        await expect(response).resolves.toMatchObject({
+          document: { token: "current-document", frameId: 12 },
+          isTopFrame: false,
+        });
+      }
+      expect(reply).toHaveBeenCalledTimes(1);
+    }
+  );
 
   test("cleans up transbox-only runtime on stop", () => {
     const manager = createManager({ transboxOnly: true });

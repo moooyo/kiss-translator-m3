@@ -403,7 +403,13 @@ export default function Popup() {
     enabled: !isSeparate && !previewData,
     initialData: previewData,
   });
-  const { rule, setting, capabilities, isTopFrame } = data || {};
+  const {
+    rule,
+    setting,
+    capabilities,
+    isTopFrame,
+    document: documentInfo,
+  } = data || {};
   const popupShellRef = useRef(null);
   const initialFocusGuardRef = useRef(true);
 
@@ -464,13 +470,13 @@ export default function Popup() {
         value: "page",
         label: i18n("popup_page_translation"),
         tabId: "kt-popup-page-tab",
-        panelId: "kt-popup-active-panel",
+        panelId: "kt-popup-page-panel",
       },
       {
         value: "text",
         label: i18n("popup_text_translation"),
         tabId: "kt-popup-text-tab",
-        panelId: "kt-popup-active-panel",
+        panelId: "kt-popup-text-panel",
       },
     ],
     [i18n]
@@ -522,17 +528,20 @@ export default function Popup() {
         </Tabs>
       </div>
       <div
-        id="kt-popup-active-panel"
+        id="kt-popup-page-panel"
         role="tabpanel"
-        aria-labelledby={`kt-popup-${activeTab}-tab`}
+        aria-labelledby="kt-popup-page-tab"
         className="kt-popup-scroll"
+        hidden={activeTab !== "page"}
       >
-        {activeTab === "text" ? (
-          <Trantab />
-        ) : rule && setting ? (
+        {/* Page actions live as long as this document generation, including
+            while the user visits text translation and an action settles. */}
+        {rule && setting ? (
           <PopupCont
             key={generation}
             targetTab={tab}
+            documentInfo={documentInfo}
+            isVisible={activeTab === "page"}
             onPageUnavailable={markUnavailable}
             capabilities={capabilities}
             isTopFrame={isTopFrame}
@@ -577,6 +586,16 @@ export default function Popup() {
           </div>
         )}
       </div>
+      {activeTab === "text" && (
+        <div
+          id="kt-popup-text-panel"
+          role="tabpanel"
+          aria-labelledby="kt-popup-text-tab"
+          className="kt-popup-scroll"
+        >
+          <Trantab />
+        </div>
+      )}
     </main>
   );
 }

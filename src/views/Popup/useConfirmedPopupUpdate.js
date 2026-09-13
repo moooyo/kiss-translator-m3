@@ -32,12 +32,6 @@ export function useConfirmedPopupUpdate({ value, setValue, onError }) {
       let failure;
       try {
         confirmed = await sendUpdate();
-        if (
-          !confirmed ||
-          names.some((name) => confirmed[name] !== values[name])
-        ) {
-          throw new Error("Page state did not confirm the requested update");
-        }
       } catch (error) {
         failure = error;
       }
@@ -60,7 +54,9 @@ export function useConfirmedPopupUpdate({ value, setValue, onError }) {
         }
         if (pendingRef.current[name] === sequence) {
           delete pendingRef.current[name];
-          if (failure) {
+          // A newer edit may explain another field's mismatched readback.
+          // Only reject fields that this request still owns.
+          if (failure || !confirmed || confirmed[name] !== values[name]) {
             settledValues[name] = confirmedRef.current[name];
             reportFailure = true;
           }
@@ -73,7 +69,12 @@ export function useConfirmedPopupUpdate({ value, setValue, onError }) {
       if (Object.keys(settledValues).length) {
         setValue((previous) => ({ ...previous, ...settledValues }));
       }
-      if (reportFailure) onError(failure);
+      if (reportFailure) {
+        onError(
+          failure ||
+            new Error("Page state did not confirm the requested update")
+        );
+      }
     },
     [onError, setValue]
   );
