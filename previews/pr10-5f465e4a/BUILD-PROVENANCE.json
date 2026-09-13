@@ -1,0 +1,119 @@
+{
+  "sourceCommit": "5f465e4a0d03f32c802113a181b7d331c85abe85",
+  "sourceRepository": "https://github.com/moooyo/kiss-translator-m3",
+  "pullRequest": "https://github.com/moooyo/kiss-translator-m3/pull/10",
+  "sourceVersion": "2.0.32",
+  "sourceArchiveSha256": "f17ae240533e8e643dd038d7f9ff5594fbe4a5825c636150436796aa18f0b49c",
+  "sourceFilesVerifiedBeforeAndAfter": 474,
+  "trackedSourceUnchanged": true,
+  "buildEnvironment": "Remote ssh test-env; Linux; Node.js v22.23.2; CI=true",
+  "builtAtUtc": "2026-09-13T00:43:53.807628+00:00",
+  "dependencyManifestSha256": {
+    "package.json": "b4bc0c223034c12ce042fb1e113891cf276610ed4e36cc73f64418be512c0ccc",
+    "pnpm-lock.yaml": "4b5c2e8157ab95548644b3efe6748c02e02979d030ad0318bf2cb8f4af85ca7d"
+  },
+  "dependencySetup": "Reused /root/work/kiss-pr1079-merge-20260911/source/node_modules; no dependency installation was performed during this artifact run.",
+  "buildResourceLimits": {
+    "nodeMaxOldSpaceSizeMiB": 1536,
+    "workerCpuCount": 2,
+    "targetsRunSerially": true
+  },
+  "builds": {
+    "chrome": {
+      "exitCode": 0,
+      "durationSeconds": 35.63,
+      "command": [
+        "/opt/node22/bin/node",
+        "node_modules/zx/build/cli.js",
+        "src/scripts/build-task.mjs",
+        "--target=chrome"
+      ]
+    },
+    "firefox": {
+      "exitCode": 0,
+      "durationSeconds": 23.68,
+      "command": [
+        "/opt/node22/bin/node",
+        "node_modules/zx/build/cli.js",
+        "src/scripts/build-task.mjs",
+        "--target=firefox"
+      ]
+    },
+    "web": {
+      "exitCode": 0,
+      "durationSeconds": 19.34,
+      "command": [
+        "/opt/node22/bin/node",
+        "node_modules/zx/build/cli.js",
+        "src/scripts/build-task.mjs",
+        "--target=web"
+      ]
+    }
+  },
+  "webBuildEnvironmentOverrides": {
+    "PUBLIC_URL": "./",
+    "REACT_APP_NAME": "KISS Translator PR 10 Preview",
+    "REACT_APP_NAME_CN": "KISS Translator PR 10 Preview",
+    "REACT_APP_HOMEPAGE": "https://github.com/moooyo/kiss-translator-m3",
+    "REACT_APP_RELEASES_URL": "https://github.com/moooyo/kiss-translator-m3/releases/tag/pr10-5f465e4a",
+    "REACT_APP_LOGOURL": "https://moooyo.github.io/kiss-translator-m3/previews/pr10-5f465e4a/images/logo192.png",
+    "REACT_APP_USERSCRIPT_DOWNLOADURL": "https://moooyo.github.io/kiss-translator-m3/previews/pr10-5f465e4a/kiss-translator.user.js",
+    "REACT_APP_USERSCRIPT_IOS_DOWNLOADURL": "https://github.com/moooyo/kiss-translator-m3/releases/tag/pr10-5f465e4a",
+    "REACT_APP_SITEURL": "https://moooyo.github.io/kiss-translator-m3/previews/pr10-5f465e4a",
+    "REACT_APP_VERSION_URL": "https://moooyo.github.io/kiss-translator-m3/previews/pr10-5f465e4a/version.txt",
+    "REACT_APP_SITEURL_GITHUB": "https://moooyo.github.io/kiss-translator-m3/previews/pr10-5f465e4a",
+    "REACT_APP_VERSION_URL_GITHUB": "https://moooyo.github.io/kiss-translator-m3/previews/pr10-5f465e4a/version.txt",
+    "REACT_APP_SITEURL_DEV": "https://moooyo.github.io/kiss-translator-m3/previews/pr10-5f465e4a",
+    "REACT_APP_VERSION_URL_DEV": "https://moooyo.github.io/kiss-translator-m3/previews/pr10-5f465e4a/version.txt",
+    "REACT_APP_OPTIONSPAGE": "https://moooyo.github.io/kiss-translator-m3/previews/pr10-5f465e4a/options.html",
+    "REACT_APP_OPTIONSPAGE_GITHUB": "https://moooyo.github.io/kiss-translator-m3/previews/pr10-5f465e4a/options.html",
+    "REACT_APP_OPTIONSPAGE_DEV": "https://moooyo.github.io/kiss-translator-m3/previews/pr10-5f465e4a/options.html",
+    "REACT_APP_OPTIONSPAGE_LOCAL": "https://moooyo.github.io/kiss-translator-m3/previews/pr10-5f465e4a/options.html"
+  },
+  "artifactChecks": {
+    "chrome": {
+      "manifestMatchesSource": true,
+      "version": "2.0.32",
+      "entryFilesPresent": true
+    },
+    "firefox": {
+      "manifestMatchesSource": true,
+      "version": "2.0.32",
+      "entryFilesPresent": true
+    },
+    "userscript": {
+      "previewNameAndNamespace": true,
+      "commitSpecificInstallAndSettingsUrls": true,
+      "version": "2.0.32"
+    }
+  },
+  "previousVerification": {
+    "relatedJestSuitesPassed": 63,
+    "relatedJestTestsPassed": 754,
+    "finalPopupSuitesRerunPassed": 11,
+    "finalPopupTestsRerunPassed": 128,
+    "changedFileFormattingPassed": true,
+    "committedSourceProductionBuildTargetsPassed": [
+      "chrome",
+      "firefox",
+      "web"
+    ],
+    "committedSourceRealChromiumUiCasesPassed": 7,
+    "browserVersion": "153.0.8010.12",
+    "testsRerunForPackaging": false,
+    "evidenceDirectory": "/tmp/kiss-pr10-fix-3dZVQY",
+    "limitations": [
+      "Escape closes the native Chrome toolbar; Escape trigger-focus restoration is not verified.",
+      "Options sync used a local protocol fixture, not a user sync account."
+    ]
+  },
+  "packagingQA": {
+    "status": "passed",
+    "scope": "Remote package structure and byte identity, extracted Chrome toolbar, and dedicated preview settings with a simulated GM bridge.",
+    "chromeBrowser": "153.0.8010.12",
+    "packagedChromeCasesPassed": 2,
+    "localPreviewSettingsPassed": true,
+    "realUserscriptManagerTested": false,
+    "publicDeploymentReport": "Public Pages and release verification is recorded separately in the artifact-QA.json release attachment."
+  }
+}
