@@ -188,17 +188,34 @@ export const migrateStoredSettingToV2 = async (
   return migrateSettingPromptsToV2(setting);
 };
 
+/** Return false if migration cannot persist settings; reads still reject. */
 export const runDataMigration = async () => {
   const rawSetting = await getSetting();
-  if (rawSetting && getSettingVersion(rawSetting) < CURRENT_SETTINGS_VERSION) {
-    try {
+  if (!rawSetting) return true;
+
+  const needsSchemaMigration =
+    getSettingVersion(rawSetting) < CURRENT_SETTINGS_VERSION;
+  const needsThemeMigration = typeof rawSetting.darkMode === "boolean";
+  if (!needsSchemaMigration && !needsThemeMigration) return true;
+
+  try {
+    let nextSetting = rawSetting;
+    if (needsSchemaMigration) {
       const v2Setting = await migrateStoredSettingToV2(rawSetting, rawSetting);
-      const nextSetting = migrateSettingToV3(v2Setting);
-      await setObj(STOKEY_SETTING, nextSetting);
-      kissLog(`Migration to V${CURRENT_SETTINGS_VERSION} completed.`);
-    } catch (err) {
-      kissLog(`Data migration to V${CURRENT_SETTINGS_VERSION} failed:`, err);
+      nextSetting = migrateSettingToV3(v2Setting);
     }
+    if (needsThemeMigration) {
+      nextSetting = {
+        ...nextSetting,
+        darkMode: rawSetting.darkMode ? "dark" : "light",
+      };
+    }
+    await setObj(STOKEY_SETTING, nextSetting);
+    kissLog(`Migration to V${CURRENT_SETTINGS_VERSION} completed.`);
+    return true;
+  } catch (err) {
+    kissLog(`Data migration to V${CURRENT_SETTINGS_VERSION} failed:`, err);
+    return false;
   }
 };
 
