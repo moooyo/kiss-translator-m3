@@ -144,6 +144,7 @@ const translateBuiltinText = async (
  * @param {boolean} [props.simpleStyle=false] Whether to use the simple text layout.
  * @param {boolean} [props.isPlayground=false] Whether to render the full Playground result surface.
  * @param {number} [props.requestRevision=0] Explicit submission revision for retrying unchanged input.
+ * @param {Function} [props.onActionPointerDown] Host focus policy for result actions.
  * @returns {JSX.Element|null} Result view for one translation provider.
  */
 export default function TranCont({
@@ -159,6 +160,7 @@ export default function TranCont({
   simpleStyle = false,
   isPlayground = false,
   requestRevision = 0,
+  onActionPointerDown,
 }) {
   const i18n = useI18n();
   const [trText, setTrText] = useState("");
@@ -397,6 +399,7 @@ export default function TranCont({
           ),
           endAdornment: (
             <Stack
+              onPointerDown={onActionPointerDown}
               className={
                 isPlayground ? "kt-translation-text-field__actions" : undefined
               }

@@ -104,7 +104,7 @@ export default function TranForm({
   const aiDictionaryTabId = `${dictionaryTabsId}-ai-tab`;
   const aiDictionaryPanelId = `${dictionaryTabsId}-ai-panel`;
 
-  // Track whether the focused input is being edited.
+  // Keep the draft while focus moves between source and result controls.
   const [editMode, setEditMode] = useState(false);
   // Keep draft input until blur or submission updates the outer text state.
   const [editText, setEditText] = useState(text);
@@ -365,6 +365,20 @@ export default function TranForm({
     setRequestRevision((revision) => revision + 1);
   };
 
+  const preserveSourceFocus = useCallback((event) => {
+    const input = inputRef.current;
+    // Result actions use the current translation without submitting a draft.
+    // Preserve pointer focus without preventing keyboard navigation.
+    if (
+      event.button === 0 &&
+      event.target.closest("button") &&
+      input?.ownerDocument.hasFocus() &&
+      input?.getRootNode().activeElement === input
+    ) {
+      event.preventDefault();
+    }
+  }, []);
+
   const translationResults = activeApiSlugs.map((slug) => (
     <TranCont
       key={slug}
@@ -380,6 +394,7 @@ export default function TranForm({
       detectedLang={deLang}
       sourceDetectionPending={fromLang === "auto" && deLoading}
       requestRevision={requestRevision}
+      onActionPointerDown={preserveSourceFocus}
     />
   ));
   return (
@@ -387,6 +402,21 @@ export default function TranForm({
       className={isPlaygound ? "kt-playground-translator" : undefined}
       spacing={simpleStyle ? 1 : 2}
       useFlexGap={isPlaygound}
+      onBlur={(event) => {
+        if (!editMode || isShadowHostMoving(event.target)) return;
+        const textControls = ".kt-translation-source, .kt-translation-result";
+        const current = event.target.closest?.(textControls);
+        const next = event.relatedTarget?.closest?.(textControls);
+        // Tab can reach the old result's copy/speech controls before submitting.
+        // Leaving this form's text controls still commits through normal blur.
+        if (
+          current &&
+          event.currentTarget.contains(current) &&
+          (!next || !event.currentTarget.contains(next))
+        ) {
+          commitEditText();
+        }
+      }}
     >
       {/* Hide language, provider, and source input controls in simple mode. */}
       {!simpleStyle && (
@@ -664,10 +694,6 @@ export default function TranForm({
               }}
               onFocus={() => {
                 setEditMode(true);
-              }}
-              onBlur={(event) => {
-                if (isShadowHostMoving(event.target)) return;
-                commitEditText();
               }}
               onKeyDown={(event) => {
                 if (event.nativeEvent.isComposing) return;

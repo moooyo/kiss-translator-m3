@@ -242,7 +242,12 @@ export default function TranslationPanelHeader({
               role="menuitemcheckbox"
               aria-checked={simpleStyle}
               disabled={simpleStyleDisabled}
-              onClick={() => setSimpleStyle((pre) => !pre)}
+              onClick={() => {
+                setShowMore(false);
+                // Collapsing removes the input; expansion will focus it again.
+                menuButtonRef.current?.focus();
+                setSimpleStyle((pre) => !pre);
+              }}
             >
               {simpleStyle ? <UnfoldMoreIcon /> : <UnfoldLessIcon />}
               {i18n("btn_tip_simple_style")}
