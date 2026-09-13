@@ -44,6 +44,17 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+function syncResult(result) {
+  return {
+    ...result,
+    commit: async ({ applyValue, isCurrent }) => {
+      if (!isCurrent()) return false;
+      await applyValue();
+      return isCurrent();
+    },
+  };
+}
+
 function createHookHost({ key = LOCAL_KEY, strict = false } = {}) {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -132,14 +143,13 @@ describe("useStorage persistence and refresh", () => {
     expect(syncData).not.toHaveBeenCalled();
   });
 
-  test("initializes a missing default once under StrictMode without syncing", async () => {
+  test("uses a missing default under StrictMode without writing or syncing", async () => {
     storedValues.delete(LOCAL_KEY);
     const host = await mountHost({ strict: true });
     await advanceTime(6000);
 
     expect(host.hookResult.data).toEqual(DEFAULT_VALUE);
-    expect(storage.setObj).toHaveBeenCalledTimes(1);
-    expect(storage.setObj).toHaveBeenCalledWith(LOCAL_KEY, DEFAULT_VALUE);
+    expect(storage.setObj).not.toHaveBeenCalled();
     expect(syncData).not.toHaveBeenCalled();
   });
 
@@ -180,10 +190,14 @@ describe("useStorage persistence and refresh", () => {
     expect(syncData).not.toHaveBeenCalled();
     await advanceTime(1);
     expect(syncData).toHaveBeenCalledTimes(1);
-    expect(syncData).toHaveBeenCalledWith(REMOTE_KEY, {
-      local: true,
-      count: 2,
-    });
+    expect(syncData).toHaveBeenCalledWith(
+      REMOTE_KEY,
+      {
+        local: true,
+        count: 2,
+      },
+      expect.objectContaining({ deferCommit: true })
+    );
   });
 
   test("persists user edits outside Options without starting remote sync", async () => {
@@ -199,7 +213,9 @@ describe("useStorage persistence and refresh", () => {
   });
 
   test("persists a new remote result once without scheduling another sync", async () => {
-    syncData.mockResolvedValue({ isNew: true, value: { remote: true } });
+    syncData.mockResolvedValue(
+      syncResult({ isNew: true, value: { remote: true } })
+    );
     const host = await mountHost();
     await act(async () => {
       host.hookResult.save({ changed: true });
@@ -249,7 +265,11 @@ describe("useStorage persistence and refresh", () => {
     await advanceTime();
 
     expect(host.hookResult.data).toEqual({ changed: true });
-    expect(syncData).toHaveBeenCalledWith(REMOTE_KEY, { changed: true });
+    expect(syncData).toHaveBeenCalledWith(
+      REMOTE_KEY,
+      { changed: true },
+      expect.any(Object)
+    );
     expect(storage.setObj).toHaveBeenCalledTimes(1);
   });
 
@@ -264,14 +284,18 @@ describe("useStorage persistence and refresh", () => {
 
     await act(async () => {
       host.hookResult.save({ edit: 2 });
-      oldSync.resolve({ isNew: true, value: { stale: true } });
+      oldSync.resolve(syncResult({ isNew: true, value: { stale: true } }));
     });
     await advanceTime();
 
     expect(host.hookResult.data).toEqual({ edit: 2 });
     expect(storedValues.get(LOCAL_KEY)).toEqual({ edit: 2 });
     expect(storage.setObj).toHaveBeenCalledTimes(2);
-    expect(syncData).toHaveBeenLastCalledWith(REMOTE_KEY, { edit: 2 });
+    expect(syncData).toHaveBeenLastCalledWith(
+      REMOTE_KEY,
+      { edit: 2 },
+      expect.any(Object)
+    );
   });
 
   test("keeps the result of the newest overlapping reload", async () => {
@@ -295,7 +319,9 @@ describe("useStorage persistence and refresh", () => {
   test("keeps a newer save after an already started remote write", async () => {
     const remoteWrite = deferred();
     const host = await mountHost();
-    syncData.mockResolvedValueOnce({ isNew: true, value: { remote: true } });
+    syncData.mockResolvedValueOnce(
+      syncResult({ isNew: true, value: { remote: true } })
+    );
     await act(async () => {
       host.hookResult.save({ edit: 1 });
     });
@@ -330,7 +356,11 @@ describe("useStorage persistence and refresh", () => {
     await advanceTime();
 
     expect(storage.setObj).toHaveBeenCalledTimes(1);
-    expect(syncData).toHaveBeenCalledWith(REMOTE_KEY, { changed: true });
+    expect(syncData).toHaveBeenCalledWith(
+      REMOTE_KEY,
+      { changed: true },
+      expect.any(Object)
+    );
   });
 
   test("cancels a pending sync when reload adopts a different persisted value", async () => {
@@ -382,7 +412,7 @@ describe("useStorage persistence and refresh", () => {
 
     await act(async () => {
       await host.hookResult.remove();
-      oldSync.resolve({ isNew: true, value: { stale: true } });
+      oldSync.resolve(syncResult({ isNew: true, value: { stale: true } }));
     });
     await advanceTime(6000);
 
@@ -442,7 +472,7 @@ describe("useStorage persistence and refresh", () => {
     expect(first.hookResult.data).toEqual({ refreshed: true });
     expect(second.hookResult.data).toEqual({ refreshed: true });
     expect(other.hookResult.data).toEqual({ updated: true });
-    expect(storage.getObj).toHaveBeenCalledTimes(3);
+    expect(storage.getObj).toHaveBeenCalledTimes(2);
     expect(storage.setObj).not.toHaveBeenCalled();
     expect(syncData).not.toHaveBeenCalled();
   });
@@ -469,5 +499,25 @@ describe("useStorage persistence and refresh", () => {
     });
 
     expect(host.hookResult.data).toEqual(DEFAULT_VALUE);
+  });
+
+  test("a missing initial value never writes over an intervening remote update", async () => {
+    storedValues.delete(LOCAL_KEY);
+    const initialRead = deferred();
+    storage.getObj.mockReturnValueOnce(initialRead.promise);
+    const host = createHookHost();
+    host.render();
+    await flushEffects();
+    const remote = { remote: true };
+    await storage.setObj(LOCAL_KEY, remote);
+    await act(async () => {
+      initialRead.resolve(null);
+    });
+    await act(async () => {
+      await refreshStorageKeys([LOCAL_KEY]);
+    });
+    expect(storedValues.get(LOCAL_KEY)).toEqual(remote);
+    expect(host.hookResult.data).toEqual(remote);
+    expect(storage.setObj).toHaveBeenCalledTimes(1);
   });
 });

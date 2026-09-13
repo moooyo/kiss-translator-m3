@@ -390,7 +390,7 @@ describe("Options startup with real storage hooks", () => {
     await act(async () => settingSync.resolve());
     await flushEffects();
     expect(storedValues.get(STOKEY_SETTING)).toEqual(remoteSetting);
-    expect(readSetting(host).marker).toBe("local-setting");
+    expect(readSetting(host).marker).toBe("remote-setting");
     expectInteractionBlocked(host, true);
     expect(trySyncRules).not.toHaveBeenCalled();
 
@@ -515,6 +515,44 @@ describe("Options startup with real storage hooks", () => {
     expect(trySyncSetting).toHaveBeenCalledTimes(1);
     expect(browser.storage.local.set).toHaveBeenCalledTimes(2);
     expect(syncData).not.toHaveBeenCalled();
+    expectInteractionBlocked(host, false);
+  });
+
+  test("ignores a failed refresh after browser back unmounts its route", async () => {
+    const rulesSync = deferred();
+    trySyncRules.mockReturnValue(rulesSync.promise);
+    const host = renderOptions("#/apis");
+    await flushEffects();
+    const navigate = async (hash) => {
+      await act(async () => {
+        window.history.pushState(null, "", hash);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      });
+      await flushEffects();
+    };
+    await navigate("#/rules");
+    let rejectRead;
+    const pendingRead = new Promise((_, reject) => {
+      rejectRead = reject;
+    });
+    const originalGetObj = storage.getObj.getMockImplementation();
+    let reloadStarted = false;
+    storage.getObj.mockImplementation((key) => {
+      if (key === STOKEY_RULES) {
+        reloadStarted = true;
+        return pendingRead;
+      }
+      return originalGetObj(key);
+    });
+    await act(async () => rulesSync.resolve());
+    await flushEffects();
+    expect(reloadStarted).toBe(true);
+    await navigate("#/apis");
+    const page = host.container.querySelector("[data-testid='apis-page']");
+    await act(async () => rejectRead(new Error("Storage request timeout")));
+    await flushEffects();
+    expect(page.isConnected).toBe(true);
+    expect(host.container.textContent).not.toContain("Storage request timeout");
     expectInteractionBlocked(host, false);
   });
 });

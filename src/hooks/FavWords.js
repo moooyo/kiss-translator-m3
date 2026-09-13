@@ -10,11 +10,11 @@ const DEFAULT_FAVWORDS = {};
  */
 export function useFavWords() {
   // 通过 useStorage 获取生词本数据并返回保存函数
-  const { data: favWords, save: saveWords } = useStorage(
-    STOKEY_WORDS,
-    DEFAULT_FAVWORDS,
-    KV_WORDS_KEY
-  );
+  const {
+    data: favWords,
+    save: saveWords,
+    isLoading,
+  } = useStorage(STOKEY_WORDS, DEFAULT_FAVWORDS, KV_WORDS_KEY);
 
   // 包装保存生词本数据的方法，在保存后自动触发防抖云同步 (WebDAV 等)
   const save = useCallback(
@@ -101,5 +101,13 @@ export function useFavWords() {
   // 仅获取所有收藏单词的纯文本列表
   const wordList = useMemo(() => favList.map(([word]) => word), [favList]);
 
-  return { favWords, favList, wordList, toggleFav, mergeWords, clearWords };
+  return {
+    favWords,
+    favList,
+    wordList,
+    toggleFav,
+    mergeWords,
+    clearWords,
+    isLoading,
+  };
 }

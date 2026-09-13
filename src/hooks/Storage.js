@@ -1,205 +1,155 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { storage } from "../libs/storage";
+import { getStorageState } from "../libs/storageState";
 import { kissLog } from "../libs/log";
 import { syncData } from "../libs/sync";
-import { subscribeStorageRefresh } from "../libs/storageRefresh";
 import { useDebouncedCallback } from "./DebouncedCallback";
 import { isOptions } from "../libs/browser";
 
-function isSameStorageValue(a, b) {
-  if (Object.is(a, b)) return true;
-
-  if (
-    a &&
-    b &&
-    typeof a === "object" &&
-    typeof b === "object" &&
-    Array.isArray(a) === Array.isArray(b)
-  ) {
-    try {
-      return JSON.stringify(a) === JSON.stringify(b);
-    } catch (err) {
-      return false;
-    }
-  }
-
-  return false;
-}
-
-/**
- * Read persisted values without writing them back. Only user edits schedule
- * remote sync; values received from remote sync are persisted once.
- * Keep defaultVal stable between renders.
- */
+/** Read without writing defaults; share edits by key. Keep defaultVal stable. */
 export function useStorage(key, defaultVal = null, syncKey = "") {
-  const [isLoading, setIsLoading] = useState(true);
-  const [data, setData] = useState(defaultVal);
-  const dataRef = useRef(defaultVal);
+  const [snapshot, setSnapshot] = useState({
+    data: defaultVal,
+    isLoading: true,
+  });
   const scopeRef = useRef(null);
-  const writeQueueRef = useRef(Promise.resolve());
-
+  const scheduleSyncRef = useRef(null);
   const isCurrent = useCallback(
     (scope, revision) =>
-      scopeRef.current === scope && scope.active && scope.revision === revision,
+      scopeRef.current === scope &&
+      scope.active &&
+      scope.state.revision === revision,
     []
   );
 
-  const setValue = useCallback((value) => {
-    dataRef.current = value;
-    setData(() => value);
-  }, []);
-
-  // Preserve the order of writes even when their asynchronous backends vary.
-  const queueWrite = useCallback((write) => {
-    const pending = writeQueueRef.current.then(write);
-    writeQueueRef.current = pending.catch(() => {});
-    return pending;
-  }, []);
-
   const runSync = useCallback(
-    async (scope, revision, keyToSync, valueToSync) => {
-      if (!isCurrent(scope, revision)) return;
-      try {
-        const res = await syncData(keyToSync, valueToSync);
-        if (!res?.isNew || !isCurrent(scope, revision)) return;
-
-        const remoteRevision = ++scope.revision;
-        await queueWrite(async () => {
-          if (!isCurrent(scope, remoteRevision)) return;
-          await storage.setObj(scope.key, res.value);
-        });
-        if (isCurrent(scope, remoteRevision)) {
-          setValue(res.value);
+    (scope, revision, value) =>
+      scope.state.enqueueSync(async () => {
+        if (!isCurrent(scope, revision) || !scope.state.dirty) return;
+        const requestEditVersion = scope.state.editVersion;
+        try {
+          const result = await syncData(syncKey, value, {
+            deferCommit: true,
+            isRequestCurrent: () => isCurrent(scope, revision),
+          });
+          if (!result) return;
+          const accepted = await scope.state.enqueueWrite(() =>
+            result.commit({
+              applyValue: async () => {
+                if (result.isNew) await storage.setObj(key, result.value);
+              },
+              rollbackValue: () => storage.setObj(key, value),
+              isCurrent: () => isCurrent(scope, revision),
+              shouldRetry: () =>
+                scope.state.snapshot.data !== null &&
+                scope.state.editVersion !== requestEditVersion,
+              getRetryTimestamp: () => scope.state.editTimestamp,
+            })
+          );
+          if (accepted && isCurrent(scope, revision)) {
+            if (result.isNew) scope.state.acceptValue(result.value);
+            else scope.state.markSynced(revision);
+            // Legacy encryption is network work, outside the local write queue.
+            await result.migrateLegacy?.();
+          } else if (scope.active && scope.state.dirty) {
+            // Retry the retained edit with its original dirty timestamp. Rejecting
+            // a response must not change the timestamp conflict policy.
+            scheduleSyncRef.current(
+              scope,
+              scope.state.revision,
+              scope.state.snapshot.data
+            );
+          }
+        } catch (error) {
+          kissLog("Sync failed", syncKey, error);
+          if (error.storageRecoveryFailed && scope.active) {
+            await scope.state
+              .load()
+              .catch((readError) =>
+                kissLog("Reload after sync failure", readError)
+              );
+          }
         }
-      } catch (error) {
-        kissLog("Sync failed", keyToSync, error);
-      }
-    },
-    [isCurrent, queueWrite, setValue]
+      }),
+    [isCurrent, key, syncKey]
   );
   const debouncedSync = useDebouncedCallback(runSync, 3000);
-
-  const load = useCallback(
-    async (initialize = false) => {
-      const scope = scopeRef.current;
-      if (!scope?.active || scope.key !== key) return;
-      const revision = scope.revision;
-      const readId = ++scope.readId;
-      const isLatestRead = () =>
-        isCurrent(scope, revision) && scope.readId === readId;
-
-      try {
-        // A reload must observe any user writes already queued by this hook.
-        await writeQueueRef.current;
-        if (!isLatestRead()) return;
-        const storedVal = await storage.getObj(key);
-        if (!isLatestRead()) return;
-
-        const nextData = storedVal ?? defaultVal;
-        if (initialize && (storedVal === undefined || storedVal === null)) {
-          await queueWrite(async () => {
-            if (isLatestRead()) await storage.setObj(key, defaultVal);
-          });
-        }
-        if (!isLatestRead()) return;
-
-        if (!isSameStorageValue(dataRef.current, nextData)) {
-          scope.revision += 1;
-          debouncedSync.cancel();
-          setValue(nextData);
-        }
-      } catch (err) {
-        kissLog(`storage load error for key: ${key}`, err);
-        throw err;
-      } finally {
-        if (
-          scopeRef.current === scope &&
-          scope.active &&
-          scope.readId === readId
-        ) {
-          setIsLoading(false);
-        }
-      }
-    },
-    [key, defaultVal, isCurrent, queueWrite, debouncedSync, setValue]
-  );
-  const reload = useCallback(() => load().catch(() => {}), [load]);
+  scheduleSyncRef.current = debouncedSync;
 
   useEffect(() => {
-    const scope = { key, active: true, revision: 0, readId: 0 };
+    const state = getStorageState(key, defaultVal);
+    const scope = { key, state, active: true };
     scopeRef.current = scope;
-    setValue(defaultVal);
-    setIsLoading(true);
-    const unsubscribe = subscribeStorageRefresh(key, () => load());
-    load(true).catch(() => {});
-
+    const unsubscribe = state.subscribe((next) => {
+      if (scope.active) setSnapshot(next);
+    });
+    state.ensureLoaded().catch((error) => {
+      if (scope.active) kissLog(`storage load error for key: ${key}`, error);
+    });
     return () => {
       scope.active = false;
       debouncedSync.cancel();
       unsubscribe();
     };
-  }, [key, defaultVal, load, setValue, debouncedSync]);
+  }, [key, defaultVal, debouncedSync]);
 
   const save = useCallback(
     (valueOrFn) => {
       const scope = scopeRef.current;
-      if (!scope?.active || scope.key !== key) return;
-      const nextData =
-        typeof valueOrFn === "function"
-          ? valueOrFn(dataRef.current)
-          : valueOrFn;
-      if (isSameStorageValue(dataRef.current, nextData)) return;
-
-      const revision = ++scope.revision;
-      debouncedSync.cancel();
-      setValue(nextData);
-      setIsLoading(false);
-      if (nextData === null) return;
-
-      // Complete explicit user writes even if their component closes meanwhile.
-      queueWrite(() => storage.setObj(key, nextData))
-        .then(() => {
-          if (isCurrent(scope, revision) && syncKey && isOptions()) {
-            debouncedSync(scope, revision, syncKey, nextData);
+      if (!scope?.active || scope.key !== key) return Promise.resolve();
+      return scope.state
+        .save(valueOrFn)
+        .then((saved) => {
+          if (
+            saved &&
+            isCurrent(scope, saved.revision) &&
+            syncKey &&
+            isOptions()
+          ) {
+            debouncedSync(scope, saved.revision, saved.value);
           }
         })
-        .catch((err) => {
-          kissLog(`storage save error for key: ${key}`, err);
+        .catch((error) => {
+          kissLog(`storage save error for key: ${key}`, error);
         });
     },
-    [key, syncKey, isCurrent, queueWrite, debouncedSync, setValue]
+    [key, syncKey, isCurrent, debouncedSync]
   );
 
   const update = useCallback(
-    (partialDataOrFn) => {
-      save((prevData) => {
-        const partialData =
+    (partialDataOrFn) =>
+      save((previous) => {
+        const partial =
           typeof partialDataOrFn === "function"
-            ? partialDataOrFn(prevData)
+            ? partialDataOrFn(previous)
             : partialDataOrFn;
-        const baseObj =
-          typeof prevData === "object" && prevData !== null ? prevData : {};
-        return { ...baseObj, ...partialData };
-      });
-    },
+        const base =
+          typeof previous === "object" && previous !== null ? previous : {};
+        return { ...base, ...partial };
+      }),
     [save]
   );
 
   const remove = useCallback(async () => {
     const scope = scopeRef.current;
     if (!scope?.active || scope.key !== key) return;
-    const revision = ++scope.revision;
     debouncedSync.cancel();
     try {
-      await queueWrite(() => storage.del(key));
-      if (isCurrent(scope, revision)) {
-        setValue(null);
-        setIsLoading(false);
-      }
-    } catch (err) {
-      kissLog(`storage remove error for key: ${key}`, err);
+      await scope.state.remove();
+    } catch (error) {
+      kissLog(`storage remove error for key: ${key}`, error);
     }
-  }, [key, isCurrent, queueWrite, debouncedSync, setValue]);
+  }, [key, debouncedSync]);
 
-  return { data, save, update, remove, reload, isLoading };
+  const reload = useCallback(async () => {
+    const scope = scopeRef.current;
+    if (!scope?.active || scope.key !== key) return;
+    try {
+      await scope.state.load();
+    } catch (error) {
+      if (scope.active) kissLog(`storage reload error for key: ${key}`, error);
+    }
+  }, [key]);
+
+  return { ...snapshot, save, update, remove, reload };
 }
