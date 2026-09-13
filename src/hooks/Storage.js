@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { storage } from "../libs/storage";
 import { kissLog } from "../libs/log";
 import { syncData } from "../libs/sync";
+import { subscribeStorageRefresh } from "../libs/storageRefresh";
 import { useDebouncedCallback } from "./DebouncedCallback";
 import { isOptions } from "../libs/browser";
 
@@ -26,161 +27,179 @@ function isSameStorageValue(a, b) {
 }
 
 /**
- * 自定义 Storage 同步 Hook，用于在 React 组件生命周期中存取本地 Storage 状态
- *
- * // REVIEW: 1. 多实例数据非同步隐患。
- * //    `useStorage` 在内部通过 React 的 `useState` 管理局部状态，并在副作用中调用 `storage.setObj` 写入存储。
- * //    但是，如果同一个 key 被页面中多个相互隔离的组件组件（例如 Popup、Options 或 Content 中的不同组件实例）同时使用，
- * //    其中一个组件调用了 `save(newVal)` 修改了 Storage，其他组件是无法自动感知这一数据更新的（因为缺乏监听本地存储改变的广播事件）。
- * //    建议通过增加 `chrome.storage.onChanged`（扩展模式下）或 `window.addEventListener('storage')`（网页模式下）的监听器，
- * //    在监听到对应 Key 变化时自动 `setData` 同步刷新局部 React 状态。
- *
- * @param {string} key 用于在 Storage 中存取值的键
- * @param {*} defaultVal 默认值。建议在组件外定义为常量。
- * @param {string} [syncKey=""] 用于远端同步的可选键名
- * @returns {{
- * data: *,
- * save: (valueOrFn: any | ((prevData: any) => any)) => void,
- * update: (partialDataOrFn: object | ((prevData: object) => object)) => void,
- * remove: () => Promise<void>,
- * reload: () => Promise<void>,
- * isLoading: boolean
- * }}
+ * Read persisted values without writing them back. Only user edits schedule
+ * remote sync; values received from remote sync are persisted once.
+ * Keep defaultVal stable between renders.
  */
 export function useStorage(key, defaultVal = null, syncKey = "") {
   const [isLoading, setIsLoading] = useState(true);
   const [data, setData] = useState(defaultVal);
-  const skipRemoteSyncValueRef = useRef();
+  const dataRef = useRef(defaultVal);
+  const scopeRef = useRef(null);
+  const writeQueueRef = useRef(Promise.resolve());
 
-  // 首次挂载时从本地存储异步加载初始数据
-  useEffect(() => {
-    let isMounted = true;
+  const isCurrent = useCallback(
+    (scope, revision) =>
+      scopeRef.current === scope && scope.active && scope.revision === revision,
+    []
+  );
 
-    const loadInitialData = async () => {
+  const setValue = useCallback((value) => {
+    dataRef.current = value;
+    setData(() => value);
+  }, []);
+
+  // Preserve the order of writes even when their asynchronous backends vary.
+  const queueWrite = useCallback((write) => {
+    const pending = writeQueueRef.current.then(write);
+    writeQueueRef.current = pending.catch(() => {});
+    return pending;
+  }, []);
+
+  const runSync = useCallback(
+    async (scope, revision, keyToSync, valueToSync) => {
+      if (!isCurrent(scope, revision)) return;
       try {
+        const res = await syncData(keyToSync, valueToSync);
+        if (!res?.isNew || !isCurrent(scope, revision)) return;
+
+        const remoteRevision = ++scope.revision;
+        await queueWrite(async () => {
+          if (!isCurrent(scope, remoteRevision)) return;
+          await storage.setObj(scope.key, res.value);
+        });
+        if (isCurrent(scope, remoteRevision)) {
+          setValue(res.value);
+        }
+      } catch (error) {
+        kissLog("Sync failed", keyToSync, error);
+      }
+    },
+    [isCurrent, queueWrite, setValue]
+  );
+  const debouncedSync = useDebouncedCallback(runSync, 3000);
+
+  const load = useCallback(
+    async (initialize = false) => {
+      const scope = scopeRef.current;
+      if (!scope?.active || scope.key !== key) return;
+      const revision = scope.revision;
+      const readId = ++scope.readId;
+      const isLatestRead = () =>
+        isCurrent(scope, revision) && scope.readId === readId;
+
+      try {
+        // A reload must observe any user writes already queued by this hook.
+        await writeQueueRef.current;
+        if (!isLatestRead()) return;
         const storedVal = await storage.getObj(key);
-        if (storedVal === undefined || storedVal === null) {
-          // 如果存储中没有该值，写入初始默认值
-          await storage.setObj(key, defaultVal);
-        } else if (isMounted) {
-          setData(storedVal);
+        if (!isLatestRead()) return;
+
+        const nextData = storedVal ?? defaultVal;
+        if (initialize && (storedVal === undefined || storedVal === null)) {
+          await queueWrite(async () => {
+            if (isLatestRead()) await storage.setObj(key, defaultVal);
+          });
+        }
+        if (!isLatestRead()) return;
+
+        if (!isSameStorageValue(dataRef.current, nextData)) {
+          scope.revision += 1;
+          debouncedSync.cancel();
+          setValue(nextData);
         }
       } catch (err) {
         kissLog(`storage load error for key: ${key}`, err);
+        throw err;
       } finally {
-        if (isMounted) {
+        if (
+          scopeRef.current === scope &&
+          scope.active &&
+          scope.readId === readId
+        ) {
           setIsLoading(false);
         }
       }
-    };
+    },
+    [key, defaultVal, isCurrent, queueWrite, debouncedSync, setValue]
+  );
+  const reload = useCallback(() => load().catch(() => {}), [load]);
 
-    loadInitialData();
+  useEffect(() => {
+    const scope = { key, active: true, revision: 0, readId: 0 };
+    scopeRef.current = scope;
+    setValue(defaultVal);
+    setIsLoading(true);
+    const unsubscribe = subscribeStorageRefresh(key, () => load());
+    load(true).catch(() => {});
 
     return () => {
-      isMounted = false;
+      scope.active = false;
+      debouncedSync.cancel();
+      unsubscribe();
     };
-  }, [key, defaultVal]);
+  }, [key, defaultVal, load, setValue, debouncedSync]);
 
-  // 远端同步处理器
-  const runSync = useCallback(async (keyToSync, valueToSync) => {
-    try {
-      const res = await syncData(keyToSync, valueToSync);
-      if (res?.isNew) {
-        setData(res.value);
-      }
-    } catch (error) {
-      kissLog("Sync failed", keyToSync);
-    }
-  }, []);
+  const save = useCallback(
+    (valueOrFn) => {
+      const scope = scopeRef.current;
+      if (!scope?.active || scope.key !== key) return;
+      const nextData =
+        typeof valueOrFn === "function"
+          ? valueOrFn(dataRef.current)
+          : valueOrFn;
+      if (isSameStorageValue(dataRef.current, nextData)) return;
 
-  // 对远端同步逻辑进行防抖，防止高频触发写盘和网络请求
-  const debouncedSync = useDebouncedCallback(runSync, 3000);
+      const revision = ++scope.revision;
+      debouncedSync.cancel();
+      setValue(nextData);
+      setIsLoading(false);
+      if (nextData === null) return;
 
-  // 数据发生改变时触发本地写盘及远端同步
-  useEffect(() => {
-    if (isLoading) {
-      return;
-    }
+      // Complete explicit user writes even if their component closes meanwhile.
+      queueWrite(() => storage.setObj(key, nextData))
+        .then(() => {
+          if (isCurrent(scope, revision) && syncKey && isOptions()) {
+            debouncedSync(scope, revision, syncKey, nextData);
+          }
+        })
+        .catch((err) => {
+          kissLog(`storage save error for key: ${key}`, err);
+        });
+    },
+    [key, syncKey, isCurrent, queueWrite, debouncedSync, setValue]
+  );
 
-    if (data === null) {
-      return;
-    }
+  const update = useCallback(
+    (partialDataOrFn) => {
+      save((prevData) => {
+        const partialData =
+          typeof partialDataOrFn === "function"
+            ? partialDataOrFn(prevData)
+            : partialDataOrFn;
+        const baseObj =
+          typeof prevData === "object" && prevData !== null ? prevData : {};
+        return { ...baseObj, ...partialData };
+      });
+    },
+    [save]
+  );
 
-    storage.setObj(key, data).catch((err) => {
-      kissLog(`storage save error for key: ${key}`, err);
-    });
-
-    if (
-      skipRemoteSyncValueRef.current &&
-      Object.is(skipRemoteSyncValueRef.current.value, data)
-    ) {
-      skipRemoteSyncValueRef.current = undefined;
-      return;
-    }
-
-    // 仅在配置后台页面中触发远端同步
-    if (syncKey && isOptions()) {
-      debouncedSync(syncKey, data);
-    }
-  }, [key, syncKey, isLoading, data, debouncedSync]);
-
-  /**
-   * 全量替换状态值并自动触发写盘副作用
-   * @param {any | ((prevData: any) => any)} valueOrFn 新的值或一个返回新值的函数。
-   */
-  const save = useCallback((valueOrFn) => {
-    setData((prevData) =>
-      typeof valueOrFn === "function" ? valueOrFn(prevData) : valueOrFn
-    );
-  }, []);
-
-  /**
-   * 合并部分对象到当前状态（假设状态是一个对象）。
-   * @param {object | ((prevData: object) => object)} partialDataOrFn 要合并的对象或一个返回该对象的函数。
-   */
-  const update = useCallback((partialDataOrFn) => {
-    setData((prevData) => {
-      const partialData =
-        typeof partialDataOrFn === "function"
-          ? partialDataOrFn(prevData)
-          : partialDataOrFn;
-      // 确保 preData 是一个对象，避免展开 null 或 undefined
-      const baseObj =
-        typeof prevData === "object" && prevData !== null ? prevData : {};
-      return { ...baseObj, ...partialData };
-    });
-  }, []);
-
-  /**
-   * 从 Storage 中删除该值，并将状态重置为 null。
-   */
   const remove = useCallback(async () => {
+    const scope = scopeRef.current;
+    if (!scope?.active || scope.key !== key) return;
+    const revision = ++scope.revision;
+    debouncedSync.cancel();
     try {
-      await storage.del(key);
-      setData(null);
+      await queueWrite(() => storage.del(key));
+      if (isCurrent(scope, revision)) {
+        setValue(null);
+        setIsLoading(false);
+      }
     } catch (err) {
       kissLog(`storage remove error for key: ${key}`, err);
     }
-  }, [key]);
-
-  /**
-   * 从 Storage 重新加载数据以覆盖当前状态。
-   */
-  const reload = useCallback(async () => {
-    try {
-      const storedVal = await storage.getObj(key);
-      const nextData = storedVal ?? defaultVal;
-      if (isSameStorageValue(data, nextData)) {
-        return;
-      }
-      if (!Object.is(data, nextData)) {
-        skipRemoteSyncValueRef.current = { value: nextData };
-      }
-      setData(nextData);
-    } catch (err) {
-      kissLog(`storage reload error for key: ${key}`, err);
-    }
-  }, [key, defaultVal, data]);
+  }, [key, isCurrent, queueWrite, debouncedSync, setValue]);
 
   return { data, save, update, remove, reload, isLoading };
 }
