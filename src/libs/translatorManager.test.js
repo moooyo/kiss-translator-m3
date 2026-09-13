@@ -7,6 +7,13 @@ const mockPopupInstances = [];
 const mockFabInstances = [];
 const activeManagers = [];
 
+jest.mock("./popupDocument", () => ({
+  getPopupDocumentIdentity: () => ({
+    token: "current-document",
+    url: "https://example.com/page",
+  }),
+}));
+
 jest.mock("./ruleEditorManager", () => ({
   RuleEditorManager: class {
     destroy = jest.fn();
@@ -27,6 +34,7 @@ jest.mock("../config", () => ({
   MSG_OPEN_TRANBOX: "open-tranbox",
   MSG_TRANSBOX_TOGGLE: "transbox-toggle",
   MSG_POPUP_TOGGLE: "popup-toggle",
+  MSG_RULE_EDITOR: "rule-editor",
   MSG_MOUSEHOVER_TOGGLE: "mousehover-toggle",
   MSG_TRANSINPUT_TOGGLE: "transinput-toggle",
   OPT_SHORTCUT_TRANSLATE: "translate",
@@ -40,6 +48,7 @@ jest.mock("../config", () => ({
 jest.mock("./browser", () => ({
   browser: {
     runtime: {
+      sendMessage: jest.fn(),
       onMessage: {
         addListener: jest.fn(),
         removeListener: jest.fn(),
@@ -121,6 +130,7 @@ jest.mock("./popupManager", () => ({
     const instance = {
       destroy: jest.fn(),
       toggle: jest.fn(),
+      hide: jest.fn(),
     };
     mockPopupInstances.push(instance);
     return instance;
@@ -162,6 +172,7 @@ const { TransboxManager } = require("./tranbox");
 const { InputTranslator } = require("./inputTranslate");
 const { PopupManager } = require("./popupManager");
 const { FabManager } = require("./fabManager");
+const { sendIframeMsg } = require("./iframe");
 const TranslatorManager = require("./translatorManager").default;
 
 function setupMockConstructors() {
@@ -231,6 +242,7 @@ function setupMockConstructors() {
     const instance = {
       destroy: jest.fn(),
       toggle: jest.fn(),
+      hide: jest.fn(),
     };
     mockPopupInstances.push(instance);
     return instance;
@@ -249,6 +261,7 @@ function createManager({
   rule = { transOpen: "true" },
   setting = {},
   isUserscript = false,
+  isIframe = false,
   transboxOnly = false,
 } = {}) {
   const manager = new TranslatorManager({
@@ -264,7 +277,7 @@ function createManager({
     rule,
     fabConfig: { isHide: false },
     favWords: [],
-    isIframe: false,
+    isIframe,
     isUserscript,
     transboxOnly,
   });
@@ -546,6 +559,19 @@ describe("TranslatorManager SPA lifecycle", () => {
     expect(response).toEqual({
       rule: translator.rule,
       setting: translator.setting,
+      capabilities: {
+        pageTranslation: true,
+        selectionTranslation: true,
+        hoverTranslation: true,
+        inputTranslation: true,
+        ruleEditor: true,
+      },
+      isTopFrame: true,
+      document: {
+        token: "current-document",
+        url: "https://example.com/page",
+        frameId: 0,
+      },
     });
     expect(response.setting.uiLang).toBe("en");
     expect(response.setting.tranboxSetting.transOpen).toBe(false);
@@ -675,6 +701,234 @@ describe("TranslatorManager SPA lifecycle", () => {
       document.removeEventListener("kiss-inner", onSelectionChange);
     }
   });
+
+  test.each([
+    {
+      name: "a child frame",
+      options: { isIframe: true },
+      capabilities: {
+        pageTranslation: true,
+        selectionTranslation: true,
+        hoverTranslation: true,
+        inputTranslation: false,
+        ruleEditor: false,
+      },
+      isTopFrame: false,
+    },
+    {
+      name: "a PDF selection-only frame",
+      options: { transboxOnly: true },
+      capabilities: {
+        pageTranslation: false,
+        selectionTranslation: true,
+        hoverTranslation: false,
+        inputTranslation: false,
+        ruleEditor: false,
+      },
+      isTopFrame: true,
+    },
+  ])(
+    "reports the modules available in $name",
+    async ({ options, capabilities, isTopFrame }) => {
+      browser.runtime.sendMessage.mockResolvedValue(12);
+      const manager = createManager(options);
+      manager.start();
+      await flushMutationObserver();
+
+      expect(sendRuntimeMessage({ action: "trans-getrule" })).toEqual(
+        expect.objectContaining({ capabilities, isTopFrame })
+      );
+    }
+  );
+
+  test("rejects top-only operations in child frames while retaining translation", () => {
+    const manager = createManager({ isIframe: true });
+    manager.start();
+
+    for (const action of [
+      "transinput-toggle",
+      "input-translate",
+      "rule-editor",
+    ]) {
+      expect(sendRuntimeMessage({ action })).toEqual({
+        error: expect.any(String),
+      });
+    }
+    expect(
+      mockTranslatorInstances[0].toggleInputTranslate
+    ).not.toHaveBeenCalled();
+
+    for (const action of [
+      "trans-toggle",
+      "transbox-toggle",
+      "mousehover-toggle",
+    ]) {
+      const response = sendRuntimeMessage({ action });
+      expect(response.error).toBeUndefined();
+      expect(response.isTopFrame).toBe(false);
+    }
+    expect(mockTranslatorInstances[0].toggle).toHaveBeenCalledTimes(1);
+    expect(mockTransboxInstances[0].toggle).toHaveBeenCalledTimes(1);
+    expect(mockTranslatorInstances[0].toggleMouseHover).toHaveBeenCalledTimes(
+      1
+    );
+    expect(sendIframeMsg).not.toHaveBeenCalled();
+  });
+
+  test("rejects page operations when only PDF selection translation exists", () => {
+    const manager = createManager({ transboxOnly: true });
+    manager.start();
+
+    for (const action of [
+      "trans-toggle",
+      "trans-putrule",
+      "mousehover-toggle",
+      "transinput-toggle",
+      "rule-editor",
+    ]) {
+      expect(sendRuntimeMessage({ action })).toEqual({
+        error: expect.any(String),
+      });
+    }
+    expect(mockTransboxInstances[0].isEnabled()).toBe(true);
+  });
+
+  test("confirms direct operations without forwarding top-only commands", () => {
+    const manager = createManager();
+    manager.start();
+    const { processActions } = PopupManager.mock.calls[0][0];
+
+    const response = processActions({
+      action: "transinput-toggle",
+      args: { enabled: false },
+    });
+    processActions({ action: "input-translate" });
+    expect(response.setting.inputRule.transOpen).toBe(false);
+    expect(sendIframeMsg).not.toHaveBeenCalled();
+
+    processActions({ action: "transbox-toggle", args: { enabled: false } });
+    expect(sendIframeMsg).toHaveBeenCalledWith("transbox-toggle", {
+      enabled: false,
+    });
+  });
+
+  test("confirms a rule editor only after its session is visible", () => {
+    const manager = createManager();
+    manager.start();
+    const editor = manager._ruleEditorManager;
+    editor.open.mockImplementation(() => {
+      editor.session = {};
+      editor.isVisible = true;
+    });
+
+    const response = sendRuntimeMessage({ action: "rule-editor" });
+
+    expect(response.ruleEditorOpened).toBe(true);
+    expect(mockPopupInstances[0].hide).toHaveBeenCalledTimes(1);
+    expect(sendIframeMsg).not.toHaveBeenCalled();
+    expect(sendRuntimeMessage({ action: "transbox-toggle" })).toEqual({
+      error: expect.any(String),
+    });
+    expect(mockTransboxInstances[0].toggle).not.toHaveBeenCalled();
+  });
+
+  test("keeps the Popup open when the rule editor cannot mount", () => {
+    const manager = createManager();
+    manager.start();
+
+    expect(sendRuntimeMessage({ action: "rule-editor" })).toEqual({
+      error: "The rule editor could not be opened.",
+    });
+    expect(mockPopupInstances[0].hide).not.toHaveBeenCalled();
+  });
+
+  test("reports runtime operation failures through the existing error response", () => {
+    const manager = createManager();
+    manager.start();
+    manager._ruleEditorManager.open.mockImplementation(() => {
+      throw new Error("Editor initialization failed.");
+    });
+
+    expect(sendRuntimeMessage({ action: "rule-editor" })).toEqual({
+      error: "Editor initialization failed.",
+    });
+    expect(mockPopupInstances[0].hide).not.toHaveBeenCalled();
+  });
+
+  test("rejects a guarded command addressed to a replaced document", () => {
+    const manager = createManager();
+    manager.start();
+    expect(
+      sendRuntimeMessage({
+        action: "trans-toggle",
+        args: { enabled: true },
+        expectedDocumentToken: "old-document",
+      })
+    ).toEqual({
+      error: "The requested document is no longer current.",
+      code: "STALE_DOCUMENT",
+    });
+    expect(mockTranslatorInstances[0].enable).not.toHaveBeenCalled();
+    expect(
+      sendRuntimeMessage({
+        action: "trans-getrule",
+        expectedDocumentToken: "current-document",
+      }).document.token
+    ).toBe("current-document");
+  });
+
+  test("uses the background's frame ID for a child document", async () => {
+    browser.runtime.sendMessage.mockResolvedValue(12);
+    const manager = createManager({ isIframe: true });
+    manager.start();
+    await flushMutationObserver();
+    expect(sendRuntimeMessage({ action: "trans-getrule" }).document).toEqual({
+      token: "current-document",
+      url: "https://example.com/page",
+      frameId: 12,
+    });
+    expect(browser.runtime.sendMessage).toHaveBeenCalledWith({
+      action: "get_frame_id",
+    });
+  });
+
+  test.each([false, true])(
+    "waits for child identity before answering a snapshot (stopped: %s)",
+    async (stopped) => {
+      let resolveFrameId;
+      browser.runtime.sendMessage.mockReturnValue(
+        new Promise((resolve) => {
+          resolveFrameId = resolve;
+        })
+      );
+      const manager = createManager({ isIframe: true });
+      manager.start();
+      const handler = browser.runtime.onMessage.addListener.mock.calls[0][0];
+      const reply = jest.fn();
+      const response = new Promise((resolve) => {
+        expect(
+          handler({ action: "trans-getrule" }, {}, (value) => {
+            reply(value);
+            resolve(value);
+          })
+        ).toBe(true);
+      });
+      expect(reply).not.toHaveBeenCalled();
+      if (stopped) manager.stop();
+      resolveFrameId(12);
+      if (stopped) {
+        await expect(response).resolves.toMatchObject({
+          code: "STALE_DOCUMENT",
+        });
+      } else {
+        await expect(response).resolves.toMatchObject({
+          document: { token: "current-document", frameId: 12 },
+          isTopFrame: false,
+        });
+      }
+      expect(reply).toHaveBeenCalledTimes(1);
+    }
+  );
 
   test("cleans up transbox-only runtime on stop", () => {
     const manager = createManager({ transboxOnly: true });
