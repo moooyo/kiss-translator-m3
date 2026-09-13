@@ -38,4 +38,25 @@ describe("tab messaging targets", () => {
       { frameId: 0 }
     );
   });
+
+  test("keeps broadcasts on the tab whose controls initiated the action", async () => {
+    await sendTabMsg("toggle", { enabled: true }, undefined, 29);
+
+    expect(mockQuery).not.toHaveBeenCalled();
+    expect(mockSendMessage).toHaveBeenCalledWith(29, {
+      action: "toggle",
+      args: { enabled: true },
+    });
+  });
+
+  test("uses the explicit tab and top frame without consulting active tabs", async () => {
+    await sendTopFrameMsg("get-rule", undefined, 0);
+
+    expect(mockQuery).not.toHaveBeenCalled();
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      0,
+      { action: "get-rule", args: undefined },
+      { frameId: 0 }
+    );
+  });
 });

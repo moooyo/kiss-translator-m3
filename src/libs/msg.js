@@ -33,14 +33,16 @@ export const sendBgMsg = (action, args) =>
   browser?.runtime.sendMessage({ action, args });
 
 /**
- * 向当前活跃页面标签发送通信消息。
- * @param {string} action 指令动作名称
- * @param {Object} args 指令参数数据
- * @returns {Promise<*>} 页面 Content Script 接收处理后的响应数据
+ * Send a message to a specific tab, or the active tab when no target is supplied.
+ * @param {string} action Message action.
+ * @param {Object} args Message arguments.
+ * @param {Object} options Browser message options, such as frameId.
+ * @param {number} targetTabId The tab whose state initiated this operation.
+ * @returns {Promise<*>} Content-script response.
  */
-export const sendTabMsg = async (action, args, options) => {
-  const tabId = await getCurTabId();
-  if (!tabId) return;
+export const sendTabMsg = async (action, args, options, targetTabId) => {
+  const tabId = targetTabId ?? (await getCurTabId());
+  if (tabId == null) return;
 
   // 向指定 ID 的标签页发送消息，并捕获常见的由于注入未就绪产生的错误
   const sendPromise = options
@@ -63,12 +65,13 @@ export const sendTabMsg = async (action, args, options) => {
 };
 
 /**
- * Send a query to the active tab's top frame and use only its response.
+ * Send a query or frame-local command to a tab's top frame.
  * Commands intended for every frame should continue to use sendTabMsg.
  *
  * @param {string} action Message action.
  * @param {Object} args Message arguments.
+ * @param {number} targetTabId Explicit target, or the active tab when omitted.
  * @returns {Promise<*>} Top-frame response.
  */
-export const sendTopFrameMsg = (action, args) =>
-  sendTabMsg(action, args, { frameId: 0 });
+export const sendTopFrameMsg = (action, args, targetTabId) =>
+  sendTabMsg(action, args, { frameId: 0 }, targetTabId);

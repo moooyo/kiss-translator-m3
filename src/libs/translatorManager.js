@@ -243,7 +243,7 @@ export default class TranslatorManager {
       this.#cloneConfig(this.#setting)
     );
 
-    // iframe 内只跑核心翻译，不创建顶层页面专属交互 UI。
+    // Frames keep page, selection, and hover translation, but no top-level UI.
     if (!this.#isIframe) {
       this._inputTranslator = new InputTranslator(
         this.#cloneConfig(this.#setting)
@@ -346,6 +346,21 @@ export default class TranslatorManager {
         ...setting?.tranboxSetting,
         transOpen: this._transboxManager.isEnabled(),
       },
+    };
+  }
+
+  #getRuntimeResponse() {
+    return {
+      rule: this._translator?.rule || this.#rule,
+      setting: this.#getRuntimeSetting(),
+      capabilities: {
+        pageTranslation: Boolean(this._translator),
+        selectionTranslation: Boolean(this._transboxManager),
+        hoverTranslation: Boolean(this._translator),
+        inputTranslation: Boolean(this._inputTranslator),
+        ruleEditor: Boolean(this._ruleEditorManager),
+      },
+      isTopFrame: !this.#isIframe,
     };
   }
 
@@ -610,12 +625,12 @@ export default class TranslatorManager {
    * 处理扩展 background 发送的 runtime 消息。
    */
   #handleBrowserMessage(message, sender, sendResponse) {
-    const result = this.#processActions(message, true);
-    const response = result || {
-      rule: this._translator?.rule || this.#rule,
-      setting: this.#getRuntimeSetting(),
-    };
-    sendResponse(response);
+    try {
+      const result = this.#processActions(message, true);
+      sendResponse(result || this.#getRuntimeResponse());
+    } catch (error) {
+      sendResponse({ error: error?.message || String(error) });
+    }
     return true;
   }
 
@@ -695,17 +710,57 @@ export default class TranslatorManager {
     if (!action) return;
     // Editing belongs to this frame. Never broadcast the editor or its changes.
     if (action === MSG_RULE_EDITOR) {
-      if (!this.#isIframe) {
-        this._popupManager?.hide();
-        this._ruleEditorManager?.open();
+      if (!this._ruleEditorManager) {
+        return { error: "The rule editor is unavailable in this frame." };
       }
-      return;
+      this._ruleEditorManager.open();
+      if (
+        !this._ruleEditorManager.session ||
+        !this._ruleEditorManager.isVisible
+      ) {
+        return { error: "The rule editor could not be opened." };
+      }
+      this._popupManager?.hide();
+      return { ...this.#getRuntimeResponse(), ruleEditorOpened: true };
     }
-    if (this._ruleEditorManager?.session && action !== MSG_TRANS_GETRULE)
-      return;
+    if (this._ruleEditorManager?.session && action !== MSG_TRANS_GETRULE) {
+      return {
+        error: "Page controls are paused while the rule editor is open.",
+      };
+    }
 
-    // 非 background 指令需要主动同步给子 iframe，保持多 frame 页面状态一致。
-    if (!fromExt) {
+    const requiresTranslator = [
+      MSG_TRANS_TOGGLE,
+      MSG_TRANS_TOGGLE_ONLY,
+      MSG_TRANS_TOGGLE_STYLE,
+      MSG_TRANS_PUTRULE,
+      MSG_MOUSEHOVER_TOGGLE,
+      MSG_HOVERNODE_TOGGLE,
+    ].includes(action);
+    const requiresTransbox = [MSG_OPEN_TRANBOX, MSG_TRANSBOX_TOGGLE].includes(
+      action
+    );
+    const requiresInput = [MSG_TRANSINPUT_TOGGLE, MSG_INPUT_TRANSLATE].includes(
+      action
+    );
+    if (
+      (requiresTranslator && !this._translator) ||
+      (requiresTransbox && !this._transboxManager) ||
+      (requiresInput && !this._inputTranslator) ||
+      (action === MSG_POPUP_TOGGLE && !this._popupManager)
+    ) {
+      return {
+        error: `Message action is unavailable in this frame: ${action}`,
+      };
+    }
+
+    // Keep shared translation commands in sync without forwarding top-only UI.
+    if (
+      !fromExt &&
+      !requiresInput &&
+      action !== MSG_POPUP_TOGGLE &&
+      action !== MSG_TRANS_GETRULE
+    ) {
       sendIframeMsg(action, args);
     }
 
@@ -800,5 +855,6 @@ export default class TranslatorManager {
         logger.info(`Message action is unavailable: ${action}`);
         return { error: `Message action is unavailable: ${action}` };
     }
+    return this.#getRuntimeResponse();
   }
 }
