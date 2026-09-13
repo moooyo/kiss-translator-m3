@@ -12,6 +12,7 @@ const { loadPopupData } = require("./loadData");
 const popupData = {
   rule: { transOpen: "false" },
   setting: { darkMode: "auto" },
+  isTopFrame: true,
 };
 
 describe("loadPopupData", () => {
@@ -55,11 +56,12 @@ describe("loadPopupData", () => {
   });
 
   test("loads an enabled child frame only after both top-frame attempts fail", async () => {
+    const childData = { ...popupData, isTopFrame: false };
     mockSendTopFrameMsg.mockResolvedValue(undefined);
-    mockSendTabMsg.mockResolvedValue(popupData);
+    mockSendTabMsg.mockResolvedValue(childData);
     const wait = jest.fn().mockResolvedValue(undefined);
 
-    await expect(loadPopupData({ wait })).resolves.toBe(popupData);
+    await expect(loadPopupData({ wait })).resolves.toBe(childData);
 
     expect(mockSendTopFrameMsg).toHaveBeenCalledTimes(2);
     expect(mockSendTabMsg).toHaveBeenCalledTimes(1);
@@ -104,5 +106,30 @@ describe("loadPopupData", () => {
     mockSendTabMsg.mockResolvedValue({ rule: {} });
 
     await expect(loadPopupData({ wait: jest.fn() })).resolves.toBeUndefined();
+  });
+
+  test("uses the captured tab for top-frame queries and child-frame fallback", async () => {
+    mockSendTopFrameMsg.mockResolvedValue(undefined);
+    mockSendTabMsg.mockResolvedValue({ rule: {}, setting: {} });
+
+    await expect(
+      loadPopupData({ tabId: 42, wait: jest.fn() })
+    ).resolves.toEqual({
+      rule: {},
+      setting: {},
+      isTopFrame: false,
+    });
+
+    expect(mockSendTopFrameMsg).toHaveBeenCalledWith(
+      MSG_TRANS_GETRULE,
+      undefined,
+      42
+    );
+    expect(mockSendTabMsg).toHaveBeenCalledWith(
+      MSG_TRANS_GETRULE,
+      undefined,
+      undefined,
+      42
+    );
   });
 });

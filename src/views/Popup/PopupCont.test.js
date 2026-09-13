@@ -12,6 +12,7 @@ import {
   MSG_TRANS_PUTRULE,
   MSG_TRANS_TOGGLE,
   MSG_TRANSBOX_TOGGLE,
+  MSG_TRANSINPUT_TOGGLE,
 } from "../../config";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -86,7 +87,10 @@ function openAdvancedOptions(container) {
   act(() => container.querySelector(".kt-popup-disclosure").click());
 }
 
-function renderPopupCont(props = {}, { statefulRule = false } = {}) {
+function renderPopupCont(
+  props = {},
+  { statefulRule = false, statefulSetting = false } = {}
+) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -127,14 +131,24 @@ function renderPopupCont(props = {}, { statefulRule = false } = {}) {
 
   function StatefulPopup() {
     const [currentRule, setCurrentRule] = useState({ ...rule, ...props.rule });
+    const [currentSetting, setCurrentSetting] = useState({
+      ...setting,
+      ...props.setting,
+    });
     return (
-      <PopupCont {...popupProps} rule={currentRule} setRule={setCurrentRule} />
+      <PopupCont
+        {...popupProps}
+        rule={currentRule}
+        setRule={setCurrentRule}
+        setting={currentSetting}
+        setSetting={setCurrentSetting}
+      />
     );
   }
 
   act(() => {
     root.render(
-      statefulRule ? (
+      statefulRule || statefulSetting ? (
         <StrictMode>
           <StatefulPopup />
         </StrictMode>
@@ -275,7 +289,7 @@ describe("PopupCont capability parity", () => {
   test("waits for the rule editor message before closing the extension popup", async () => {
     mockIsExt = true;
     let resolveOpen;
-    mockSendTabMsg.mockImplementation(
+    mockSendTopFrameMsg.mockImplementation(
       () => new Promise((resolve) => (resolveOpen = resolve))
     );
     const closeWindow = jest
@@ -291,11 +305,11 @@ describe("PopupCont capability parity", () => {
 
       act(() => openEditor.click());
 
-      expect(mockSendTabMsg).toHaveBeenCalledWith(MSG_RULE_EDITOR);
+      expect(mockSendTopFrameMsg).toHaveBeenCalledWith(MSG_RULE_EDITOR);
       expect(closeWindow).not.toHaveBeenCalled();
 
       await act(async () => {
-        resolveOpen();
+        resolveOpen({ ruleEditorOpened: true });
         await Promise.resolve();
       });
       expect(closeWindow).toHaveBeenCalledTimes(1);
@@ -307,6 +321,10 @@ describe("PopupCont capability parity", () => {
 
   test("swaps both languages atomically while earlier tab messages are pending", async () => {
     const pendingReplies = [];
+    mockSendTopFrameMsg.mockResolvedValue({
+      rule: { fromLang: "en", toLang: "fr" },
+      setting: {},
+    });
     mockSendTabMsg.mockImplementation(
       () =>
         new Promise((resolve) => {
@@ -915,6 +933,10 @@ describe("PopupCont capability parity", () => {
   });
 
   test("sends the desired scene state through the tab message channel", async () => {
+    mockSendTopFrameMsg.mockResolvedValue({
+      rule: {},
+      setting: { mouseHoverSetting: { useMouseHover: true } },
+    });
     const setSetting = jest.fn();
     const view = renderPopupCont({ setSetting });
     await flushEffects();
@@ -932,6 +954,355 @@ describe("PopupCont capability parity", () => {
       enabled: true,
     });
     expect(setSetting).toHaveBeenCalledTimes(1);
+    view.cleanup();
+  });
+
+  test("uses one captured tab for the site label, command, and state confirmation", async () => {
+    mockSendTopFrameMsg.mockResolvedValue({ rule: { transOpen: "false" } });
+    const view = renderPopupCont({
+      targetTab: { id: 42, url: "https://captured.example/article" },
+    });
+    await flushEffects();
+
+    expect(getCurTab).not.toHaveBeenCalled();
+    expect(view.container.querySelector(".kt-popup-site__select").value).toBe(
+      "captured.example"
+    );
+    await act(async () => {
+      view.container
+        .querySelector('input[aria-label="popup_translate_page"]')
+        .click();
+    });
+    expect(mockSendTabMsg).toHaveBeenCalledWith(
+      MSG_TRANS_TOGGLE,
+      { enabled: false },
+      undefined,
+      42
+    );
+    expect(mockSendTopFrameMsg).toHaveBeenCalledWith(
+      MSG_TRANS_GETRULE,
+      undefined,
+      42
+    );
+    view.cleanup();
+  });
+
+  test("keeps child-frame translation controls without top-frame tools", async () => {
+    const view = renderPopupCont({
+      isTopFrame: false,
+      capabilities: {
+        pageTranslation: true,
+        selectionTranslation: true,
+        hoverTranslation: true,
+        inputTranslation: false,
+        ruleEditor: false,
+      },
+    });
+    await flushEffects();
+    openAdvancedOptions(view.container);
+
+    expect(
+      view.container.querySelector('input[aria-label="popup_translate_page"]')
+        .disabled
+    ).toBe(false);
+    expect(
+      [...view.container.querySelectorAll(".kt-popup-scene")].map(
+        (node) => node.querySelector(".kt-popup-scene__label").textContent
+      )
+    ).toEqual(["selection_translate", "mousehover_translate"]);
+    expect(view.container.textContent).not.toContain("rule_editor_open");
+    view.cleanup();
+  });
+
+  test("offers only selection translation in a selection-only PDF receiver", async () => {
+    const view = renderPopupCont({
+      capabilities: {
+        pageTranslation: false,
+        selectionTranslation: true,
+        hoverTranslation: false,
+        inputTranslation: false,
+        ruleEditor: false,
+      },
+    });
+    await flushEffects();
+
+    const mainSwitch = view.container.querySelector(
+      'input[aria-label="popup_translate_page"]'
+    );
+    expect(mainSwitch.disabled).toBe(true);
+    expect(mainSwitch.checked).toBe(false);
+    expect(view.container.querySelector(".kt-popup-language-row")).toBeNull();
+    expect(view.container.querySelector(".kt-popup-style-chips")).toBeNull();
+    expect(view.container.querySelectorAll(".kt-popup-scene")).toHaveLength(1);
+    expect(
+      view.container.querySelector(".kt-popup-scene").textContent
+    ).toContain("selection_translate");
+    act(() => view.container.querySelector(".kt-popup-hero").click());
+    expect(mockSendTabMsg).not.toHaveBeenCalled();
+    view.cleanup();
+  });
+
+  test.each(["service", "style", "languages"])(
+    "restores the previous %s when the page has no receiver",
+    async (control) => {
+      const view = renderPopupCont(
+        {
+          rule: { apiSlug: "deepl", fromLang: "en", toLang: "fr" },
+        },
+        { statefulRule: true }
+      );
+      await flushEffects();
+      openAdvancedOptions(view.container);
+      const clickTarget =
+        control === "service"
+          ? view.container.querySelector(".kt-popup-service")
+          : control === "style"
+            ? view.container.querySelectorAll(".kt-popup-style-chip")[1]
+            : view.container.querySelector(".kt-popup-swap");
+
+      await act(async () => clickTarget.click());
+      await flushEffects();
+
+      expect(
+        view.container.querySelector('.kt-popup-service[aria-pressed="true"]')
+      ).toBeNull();
+      expect(
+        view.container.querySelector(
+          '.kt-popup-style-chip[aria-pressed="true"] small'
+        ).textContent
+      ).toBe("Style 6");
+      expect(
+        [
+          ...view.container.querySelectorAll(".kt-popup-language-select input"),
+        ].map((node) => node.value)
+      ).toEqual(["en", "fr"]);
+      expect(
+        view.container.querySelector('[role="alert"]').textContent
+      ).toContain("popup_action_failed");
+      view.cleanup();
+    }
+  );
+
+  test.each([
+    ["selection_translate", MSG_TRANSBOX_TOGGLE],
+    ["mousehover_translate", MSG_MOUSEHOVER_TOGGLE],
+    ["input_translate", MSG_TRANSINPUT_TOGGLE],
+  ])("rolls back %s after a rejected action", async (label, action) => {
+    const processActions = jest
+      .fn()
+      .mockResolvedValue({ error: "Unavailable" });
+    const view = renderPopupCont({ processActions }, { statefulSetting: true });
+    await flushEffects();
+    openAdvancedOptions(view.container);
+    const scene = [...view.container.querySelectorAll(".kt-popup-scene")].find(
+      (node) => node.textContent.includes(label)
+    );
+    const previous = scene.getAttribute("aria-pressed");
+
+    await act(async () => scene.click());
+
+    expect(processActions).toHaveBeenCalledWith({
+      action,
+      args: { enabled: previous !== "true" },
+    });
+    expect(scene.getAttribute("aria-pressed")).toBe(previous);
+    expect(
+      view.container.querySelector('[role="alert"]').textContent
+    ).toContain("popup_action_failed");
+    view.cleanup();
+  });
+
+  test("requires an authoritative feature state after a successful message", async () => {
+    mockSendTabMsg.mockResolvedValue({
+      setting: { mouseHoverSetting: { useMouseHover: true } },
+    });
+    mockSendTopFrameMsg.mockResolvedValue({
+      rule: {},
+      setting: { mouseHoverSetting: { useMouseHover: false } },
+    });
+    const view = renderPopupCont({}, { statefulSetting: true });
+    await flushEffects();
+    openAdvancedOptions(view.container);
+    const scene = [...view.container.querySelectorAll(".kt-popup-scene")].find(
+      (node) => node.textContent.includes("mousehover_translate")
+    );
+
+    await act(async () => scene.click());
+
+    expect(scene.getAttribute("aria-pressed")).toBe("false");
+    expect(
+      view.container.querySelector('[role="alert"]').textContent
+    ).toContain("popup_action_failed");
+    view.cleanup();
+  });
+
+  test("targets input translation at the captured top frame", async () => {
+    mockSendTopFrameMsg.mockResolvedValue({
+      rule: {},
+      setting: { inputRule: { transOpen: false } },
+    });
+    const view = renderPopupCont({
+      targetTab: { id: 42, url: "https://example.com" },
+    });
+    await flushEffects();
+    openAdvancedOptions(view.container);
+    await act(async () => {
+      [...view.container.querySelectorAll(".kt-popup-scene")]
+        .find((node) => node.textContent.includes("input_translate"))
+        .click();
+    });
+
+    expect(mockSendTopFrameMsg).toHaveBeenCalledWith(
+      MSG_TRANSINPUT_TOGGLE,
+      { enabled: false },
+      42
+    );
+    expect(mockSendTabMsg).not.toHaveBeenCalled();
+    view.cleanup();
+  });
+
+  test("keeps the popup open when the rule editor has no receiver", async () => {
+    const closeWindow = jest
+      .spyOn(window, "close")
+      .mockImplementation(() => {});
+    const view = renderPopupCont();
+    try {
+      await flushEffects();
+      openAdvancedOptions(view.container);
+      await act(async () => {
+        [...view.container.querySelectorAll("button")]
+          .find((node) => node.textContent === "rule_editor_open")
+          .click();
+      });
+      expect(closeWindow).not.toHaveBeenCalled();
+      expect(
+        view.container.querySelector('[role="alert"]').textContent
+      ).toContain("popup_action_failed");
+    } finally {
+      view.cleanup();
+      closeWindow.mockRestore();
+    }
+  });
+
+  test("ignores an old missing receiver after a newer language change succeeds", async () => {
+    let finishOldAction;
+    mockSendTabMsg.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishOldAction = resolve;
+      })
+    );
+    mockSendTopFrameMsg
+      .mockResolvedValueOnce({
+        rule: { fromLang: "en", toLang: "fr" },
+        setting: {},
+      })
+      .mockResolvedValue(undefined);
+    const onPageUnavailable = jest.fn();
+    const view = renderPopupCont(
+      {
+        rule: { fromLang: "en", toLang: "fr" },
+        onPageUnavailable,
+      },
+      { statefulRule: true }
+    );
+    await flushEffects();
+
+    act(() => view.container.querySelector(".kt-popup-swap").click());
+    await act(async () =>
+      view.container.querySelector(".kt-popup-swap").click()
+    );
+    await act(async () => finishOldAction());
+    await flushEffects();
+
+    expect(
+      [
+        ...view.container.querySelectorAll(".kt-popup-language-select input"),
+      ].map((node) => node.value)
+    ).toEqual(["en", "fr"]);
+    expect(onPageUnavailable).not.toHaveBeenCalled();
+    expect(view.container.querySelector('[role="alert"]')).toBeNull();
+    view.cleanup();
+  });
+
+  test("restores only the failed service while preserving a concurrent style change", async () => {
+    let failService;
+    mockSendTabMsg.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        failService = reject;
+      })
+    );
+    mockSendTopFrameMsg.mockResolvedValue({
+      rule: { apiSlug: "google", textStyle: "style_0" },
+      setting: {},
+    });
+    const view = renderPopupCont(
+      {
+        setting: {
+          transApis: ["google", "deepl"].map((apiSlug) => ({
+            apiSlug,
+            apiName: apiSlug,
+          })),
+        },
+      },
+      { statefulRule: true }
+    );
+    await flushEffects();
+    openAdvancedOptions(view.container);
+
+    act(() => view.container.querySelectorAll(".kt-popup-service")[1].click());
+    await act(async () =>
+      view.container.querySelectorAll(".kt-popup-style-chip")[1].click()
+    );
+    await act(async () => failService(new Error("Page action rejected")));
+
+    expect(
+      view.container.querySelector('.kt-popup-service[aria-pressed="true"]')
+        .textContent
+    ).toContain("google");
+    expect(
+      view.container.querySelector(
+        '.kt-popup-style-chip[aria-pressed="true"] small'
+      ).textContent
+    ).toBe("Style 0");
+    expect(
+      view.container.querySelector('[role="alert"]').textContent
+    ).toContain("popup_action_failed");
+    view.cleanup();
+  });
+
+  test("adopts an older confirmed change after a newer request was rejected", async () => {
+    let finishFirstAction;
+    const processActions = jest
+      .fn()
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          finishFirstAction = resolve;
+        })
+      )
+      .mockRejectedValueOnce(new Error("Newer request rejected"));
+    const view = renderPopupCont(
+      {
+        rule: { fromLang: "en", toLang: "fr" },
+        processActions,
+      },
+      { statefulRule: true }
+    );
+    await flushEffects();
+    act(() => view.container.querySelector(".kt-popup-swap").click());
+    await act(async () =>
+      view.container.querySelector(".kt-popup-swap").click()
+    );
+    await act(async () =>
+      finishFirstAction({
+        rule: { fromLang: "fr", toLang: "en" },
+      })
+    );
+
+    expect(
+      [
+        ...view.container.querySelectorAll(".kt-popup-language-select input"),
+      ].map((node) => node.value)
+    ).toEqual(["fr", "en"]);
     view.cleanup();
   });
 });

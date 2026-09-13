@@ -20,7 +20,12 @@ import Button from "@mui/material/Button";
 import IconButton from "@mui/material/IconButton";
 import Snackbar from "@mui/material/Snackbar";
 import Switch from "@mui/material/Switch";
-import { sendBgMsg, sendTabMsg, getCurTab } from "../../libs/msg";
+import {
+  sendBgMsg,
+  sendTabMsg,
+  sendTopFrameMsg,
+  getCurTab,
+} from "../../libs/msg";
 import { isExt } from "../../libs/client";
 import { useI18n } from "../../hooks/I18n";
 import {
@@ -49,6 +54,7 @@ import CompactLanguageSelect from "./CompactLanguageSelect";
 import PopupStylePreview from "./PopupStylePreview";
 import { REVIEW_URL, SUPPORT_URL } from "./supportLinks";
 import { queryPopupData } from "./loadData";
+import { useConfirmedPopupUpdate } from "./useConfirmedPopupUpdate";
 
 export function resolvePopupTextStyles(
   allTextStyles,
@@ -78,6 +84,10 @@ export default function PopupCont({
   setSetting,
   handleOpenSetting,
   processActions,
+  targetTab,
+  onPageUnavailable,
+  capabilities,
+  isTopFrame = true,
   isContent = false,
 }) {
   const i18n = useI18n();
@@ -93,7 +103,9 @@ export default function PopupCont({
     message: "",
     severity: "success",
   });
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(
+    capabilities?.pageTranslation === false
+  );
   const [showAllServices, setShowAllServices] = useState(false);
   const [showAllStyles, setShowAllStyles] = useState(false);
   const [translationBusy, setTranslationBusy] = useState(false);
@@ -103,6 +115,10 @@ export default function PopupCont({
   const translationTogglePendingRef = useRef(false);
   const snackbarSequenceRef = useRef(0);
   const ruleRef = useRef(rule);
+  const activeRef = useRef(true);
+  const pageActionSequenceRef = useRef(0);
+  const canTranslatePage = capabilities?.pageTranslation !== false;
+  const canEditRule = isTopFrame && capabilities?.ruleEditor !== false;
   const { allTextStyles } = useAllTextStyles();
   const visiblePopupTextStyles = useMemo(
     () => resolvePopupTextStyles(allTextStyles, rule?.textStyle, showAllStyles),
@@ -122,12 +138,13 @@ export default function PopupCont({
     });
   }, []);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    activeRef.current = true;
+    return () => {
+      activeRef.current = false;
       if (busyTimerRef.current) window.clearTimeout(busyTimerRef.current);
-    },
-    []
-  );
+    };
+  }, []);
 
   useLayoutEffect(() => {
     ruleRef.current = rule;
@@ -165,25 +182,69 @@ export default function PopupCont({
     showMessage(`${i18n("remove_from_blacklist")}: ${selectedDomain}`);
   }, [blacklistValue, i18n, selectedDomain, showMessage, updateSetting]);
 
+  const sendPageMessage = useCallback(
+    (action, args, topFrame = false) => {
+      if (targetTab?.id !== undefined) {
+        return topFrame
+          ? sendTopFrameMsg(action, args, targetTab.id)
+          : sendTabMsg(action, args, undefined, targetTab.id);
+      }
+      return topFrame
+        ? args === undefined
+          ? sendTopFrameMsg(action)
+          : sendTopFrameMsg(action, args)
+        : sendTabMsg(action, args);
+    },
+    [targetTab?.id]
+  );
+
+  const dispatchPageAction = useCallback(
+    async (action, args, topFrame = false) => {
+      if (processActions) {
+        const response = await processActions({ action, args });
+        if (response?.error) throw new Error(response.error);
+        return response;
+      }
+      const sequence = ++pageActionSequenceRef.current;
+      const result = await sendPageMessage(action, args, topFrame);
+      if (topFrame && result?.error) throw new Error(result.error);
+      // Broadcast responses can come from any frame. Read the preferred
+      // frame again before confirming the state shown in this panel.
+      const response = await queryPopupData(targetTab?.id);
+      if (response == null && sequence === pageActionSequenceRef.current) {
+        onPageUnavailable?.();
+      }
+      if (response?.error) throw new Error(response.error);
+      return response;
+    },
+    [onPageUnavailable, processActions, sendPageMessage, targetTab?.id]
+  );
+
+  const reportActionFailure = useCallback(
+    (error) => {
+      kissLog("update popup page state", error);
+      if (activeRef.current) showMessage(i18n("popup_action_failed"), "error");
+    },
+    [i18n, showMessage]
+  );
+  const updateRule = useConfirmedPopupUpdate({
+    value: rule,
+    setValue: setRule,
+    onError: reportActionFailure,
+  });
   const putRuleValues = useCallback(
-    async (values) => {
+    (values) => {
+      if (!canTranslatePage) return;
       // Keep consecutive actions current even before React commits their updates.
       ruleRef.current = { ...ruleRef.current, ...values };
-      setRule((previous) => ({ ...previous, ...values }));
-      try {
-        if (processActions) {
-          processActions({
-            action: MSG_TRANS_PUTRULE,
-            args: values,
-          });
-        } else {
-          await sendTabMsg(MSG_TRANS_PUTRULE, values);
-        }
-      } catch (error) {
-        kissLog("update rule", error);
-      }
+      return updateRule(values, async () => {
+        const response = await dispatchPageAction(MSG_TRANS_PUTRULE, values);
+        return processActions && response === undefined
+          ? values
+          : response?.rule;
+      });
     },
-    [processActions, setRule]
+    [canTranslatePage, dispatchPageAction, processActions, updateRule]
   );
 
   const putRuleValue = useCallback(
@@ -198,7 +259,7 @@ export default function PopupCont({
 
   const handleTransToggle = useCallback(
     async (enabled) => {
-      if (translationTogglePendingRef.current) return;
+      if (!canTranslatePage || translationTogglePendingRef.current) return;
       translationTogglePendingRef.current = true;
       setTranslationTogglePending(true);
       const previousTransOpen = rule?.transOpen;
@@ -212,16 +273,10 @@ export default function PopupCont({
       }));
       setTranslationBusy(true);
       try {
-        let response;
-        if (processActions) {
-          response = await processActions({
-            action: MSG_TRANS_TOGGLE,
-            args: { enabled },
-          });
-        } else {
-          await sendTabMsg(MSG_TRANS_TOGGLE, { enabled });
-          response = await queryPopupData();
-        }
+        const response = await dispatchPageAction(MSG_TRANS_TOGGLE, {
+          enabled,
+        });
+        if (!activeRef.current) return;
 
         if (response?.error) {
           throw new Error(response.error);
@@ -266,6 +321,7 @@ export default function PopupCont({
           resolvedEnabled ? 900 : 0
         );
       } catch (error) {
+        if (!activeRef.current) return;
         kissLog("toggle translation", error);
         setRule((previous) => ({
           ...previous,
@@ -274,15 +330,51 @@ export default function PopupCont({
         setTranslationBusy(false);
         showMessage(i18n("rule_toggle_failed"), "error");
       } finally {
-        translationTogglePendingRef.current = false;
-        setTranslationTogglePending(false);
+        if (activeRef.current) {
+          translationTogglePendingRef.current = false;
+          setTranslationTogglePending(false);
+        }
       }
     },
-    [i18n, processActions, rule?.transOpen, setRule, showMessage]
+    [
+      canTranslatePage,
+      dispatchPageAction,
+      i18n,
+      processActions,
+      rule?.transOpen,
+      setRule,
+      showMessage,
+    ]
   );
 
   const { handleInputToggle, handleMouseHoverToggle, handleTransboxToggle } =
-    usePopupFeatureToggles({ processActions, setSetting });
+    usePopupFeatureToggles({
+      setting,
+      setSetting,
+      dispatchPageAction,
+      processActions,
+      onError: reportActionFailure,
+    });
+
+  const handleOpenRuleEditor = useCallback(async () => {
+    if (!canEditRule) return;
+    try {
+      const response = processActions
+        ? await processActions({ action: MSG_RULE_EDITOR })
+        : await sendPageMessage(MSG_RULE_EDITOR, undefined, true);
+      if (!activeRef.current) return;
+      if (
+        response?.error ||
+        (!(processActions && response === undefined) &&
+          response?.ruleEditorOpened !== true)
+      ) {
+        throw new Error(response?.error || "Rule editor did not open");
+      }
+      if (!processActions) window.close();
+    } catch (error) {
+      reportActionFailure(error);
+    }
+  }, [canEditRule, processActions, reportActionFailure, sendPageMessage]);
 
   const handleClearCache = useCallback(async () => {
     const cleared = await tryClearCaches();
@@ -310,7 +402,9 @@ export default function PopupCont({
       try {
         const href = isContent
           ? window.location?.href
-          : (await getCurTab())?.url || "";
+          : targetTab
+            ? targetTab.url || ""
+            : (await getCurTab())?.url || "";
         if (!active || !href) return;
         const options = getDomainOptions(href);
         setCurrentHref(href);
@@ -323,7 +417,7 @@ export default function PopupCont({
     return () => {
       active = false;
     };
-  }, [isContent]);
+  }, [isContent, targetTab]);
 
   const services = useMemo(
     () =>
@@ -350,7 +444,8 @@ export default function PopupCont({
     scanAll,
     isPlainText: plainTextValue = false,
   } = rule || {};
-  const translationEnabled = transOpen === true || transOpen === "true";
+  const translationEnabled =
+    canTranslatePage && (transOpen === true || transOpen === "true");
   const isPlainText = plainTextValue === true || plainTextValue === "true";
   const tranboxEnabled = !!setting?.tranboxSetting?.transOpen;
   const mouseHoverEnabled = !!setting?.mouseHoverSetting?.useMouseHover;
@@ -385,6 +480,7 @@ export default function PopupCont({
       label: i18n("selection_translate"),
       icon: SelectAllRoundedIcon,
       enabled: tranboxEnabled,
+      available: capabilities?.selectionTranslation !== false,
       onChange: handleTransboxToggle,
     },
     {
@@ -392,6 +488,7 @@ export default function PopupCont({
       label: i18n("mousehover_translate"),
       icon: MouseRoundedIcon,
       enabled: mouseHoverEnabled,
+      available: capabilities?.hoverTranslation !== false,
       onChange: handleMouseHoverToggle,
     },
     {
@@ -399,6 +496,7 @@ export default function PopupCont({
       label: i18n("input_translate"),
       icon: KeyboardRoundedIcon,
       enabled: inputEnabled,
+      available: isTopFrame && capabilities?.inputTranslation !== false,
       onChange: handleInputToggle,
     },
   ];
@@ -434,8 +532,9 @@ export default function PopupCont({
           translationEnabled ? "" : "kt-popup-hero--off"
         } ${translationBusy ? "kt-popup-hero--busy" : ""}`}
         aria-busy={translationTogglePending || translationBusy}
+        aria-disabled={!canTranslatePage}
         onClick={() => {
-          if (!translationTogglePending) {
+          if (canTranslatePage && !translationTogglePending) {
             void handleTransToggle(!translationEnabled);
           }
         }}
@@ -452,17 +551,19 @@ export default function PopupCont({
             {i18n("popup_translate_page")}
           </span>
           <span className="kt-popup-hero__subtitle">
-            {translationBusy
-              ? i18n("popup_translating")
-              : translationEnabled
-                ? enabledSummary
-                : i18n("popup_disabled")}
+            {!canTranslatePage
+              ? i18n("popup_unavailable")
+              : translationBusy
+                ? i18n("popup_translating")
+                : translationEnabled
+                  ? enabledSummary
+                  : i18n("popup_disabled")}
           </span>
         </span>
         <Switch
           className="kt-popup-main-switch"
           checked={translationEnabled}
-          disabled={translationTogglePending}
+          disabled={!canTranslatePage || translationTogglePending}
           onChange={(_event, checked) => void handleTransToggle(checked)}
           onClick={(event) => event.stopPropagation()}
           inputProps={{
@@ -473,79 +574,83 @@ export default function PopupCont({
         {translationBusy && <span className="kt-popup-hero__progress" />}
       </div>
 
-      <div className="kt-popup-language-row">
-        <div className="kt-popup-language">
-          <span>{i18n("from_lang")}</span>
-          <CompactLanguageSelect
-            value={fromLang}
-            ariaLabel={i18n("from_lang")}
-            options={OPT_LANGS_FROM}
-            onChange={(event) => putRuleValue("fromLang", event.target.value)}
-          />
+      {canTranslatePage && (
+        <div className="kt-popup-language-row">
+          <div className="kt-popup-language">
+            <span>{i18n("from_lang")}</span>
+            <CompactLanguageSelect
+              value={fromLang}
+              ariaLabel={i18n("from_lang")}
+              options={OPT_LANGS_FROM}
+              onChange={(event) => putRuleValue("fromLang", event.target.value)}
+            />
+          </div>
+          <IconButton
+            className="kt-popup-swap"
+            disabled={isAutoSource}
+            title={i18n("swap_languages")}
+            onClick={handleSwapLanguages}
+          >
+            <SwapHorizRoundedIcon />
+          </IconButton>
+          <div className="kt-popup-language">
+            <span>{i18n("to_lang")}</span>
+            <CompactLanguageSelect
+              value={toLang}
+              ariaLabel={i18n("to_lang")}
+              options={OPT_LANGS_TO}
+              onChange={(event) => putRuleValue("toLang", event.target.value)}
+            />
+          </div>
         </div>
-        <IconButton
-          className="kt-popup-swap"
-          disabled={isAutoSource}
-          title={i18n("swap_languages")}
-          onClick={handleSwapLanguages}
-        >
-          <SwapHorizRoundedIcon />
-        </IconButton>
-        <div className="kt-popup-language">
-          <span>{i18n("to_lang")}</span>
-          <CompactLanguageSelect
-            value={toLang}
-            ariaLabel={i18n("to_lang")}
-            options={OPT_LANGS_TO}
-            onChange={(event) => putRuleValue("toLang", event.target.value)}
-          />
-        </div>
-      </div>
+      )}
 
-      <div className="kt-popup-services-block">
-        <div className="kt-popup-section-label">
-          {i18n("translate_service")}
+      {canTranslatePage && (
+        <div className="kt-popup-services-block">
+          <div className="kt-popup-section-label">
+            {i18n("translate_service")}
+          </div>
+          <div
+            className={`kt-popup-services ${
+              showAllServices ? "kt-popup-services--open" : ""
+            }`}
+          >
+            {visibleServices.map((service) => (
+              <button
+                type="button"
+                className="kt-popup-service"
+                aria-pressed={service.key === apiSlug}
+                key={service.key}
+                onClick={() => putRuleValue("apiSlug", service.key)}
+              >
+                <ApiProviderIcon
+                  apiType={service.type}
+                  className="kt-service-logo"
+                  lightSurface
+                />
+                <span className="kt-popup-service__name">{service.name}</span>
+              </button>
+            ))}
+            {services.length > COLLAPSED_SERVICE_LIMIT && (
+              <button
+                type="button"
+                className={`kt-popup-service kt-popup-more-service ${
+                  showAllServices ? "kt-popup-more-service--open" : ""
+                }`}
+                aria-label={serviceDisclosureLabel}
+                aria-expanded={showAllServices}
+                title={serviceDisclosureLabel}
+                onClick={() => setShowAllServices((current) => !current)}
+              >
+                {showAllServices
+                  ? i18n("popup_collapse")
+                  : `+${services.length - visibleServices.length}`}
+                <ExpandMoreRoundedIcon aria-hidden="true" />
+              </button>
+            )}
+          </div>
         </div>
-        <div
-          className={`kt-popup-services ${
-            showAllServices ? "kt-popup-services--open" : ""
-          }`}
-        >
-          {visibleServices.map((service) => (
-            <button
-              type="button"
-              className="kt-popup-service"
-              aria-pressed={service.key === apiSlug}
-              key={service.key}
-              onClick={() => putRuleValue("apiSlug", service.key)}
-            >
-              <ApiProviderIcon
-                apiType={service.type}
-                className="kt-service-logo"
-                lightSurface
-              />
-              <span className="kt-popup-service__name">{service.name}</span>
-            </button>
-          ))}
-          {services.length > COLLAPSED_SERVICE_LIMIT && (
-            <button
-              type="button"
-              className={`kt-popup-service kt-popup-more-service ${
-                showAllServices ? "kt-popup-more-service--open" : ""
-              }`}
-              aria-label={serviceDisclosureLabel}
-              aria-expanded={showAllServices}
-              title={serviceDisclosureLabel}
-              onClick={() => setShowAllServices((current) => !current)}
-            >
-              {showAllServices
-                ? i18n("popup_collapse")
-                : `+${services.length - visibleServices.length}`}
-              <ExpandMoreRoundedIcon aria-hidden="true" />
-            </button>
-          )}
-        </div>
-      </div>
+      )}
 
       <div className="kt-popup-site">
         <div className="kt-popup-site__top">
@@ -579,7 +684,7 @@ export default function PopupCont({
             variant="contained"
             color="secondary"
             onClick={handleSaveRule}
-            disabled={!domainOptions.length}
+            disabled={!canTranslatePage || !domainOptions.length}
           >
             {i18n("save_rule")}
           </Button>
@@ -623,107 +728,107 @@ export default function PopupCont({
         {showAdvanced && (
           <>
             <div className="kt-popup-scenes">
-              {scenes.map((scene) => {
-                const SceneIcon = scene.icon;
-                return (
-                  <button
-                    type="button"
-                    className="kt-popup-scene"
-                    aria-pressed={scene.enabled}
-                    key={scene.key}
-                    onClick={() => void scene.onChange(!scene.enabled)}
-                  >
-                    <SceneIcon />
-                    <span className="kt-popup-scene__copy">
-                      <span
-                        className="kt-popup-scene__label"
-                        title={scene.label}
-                      >
-                        {scene.label}
+              {scenes
+                .filter((scene) => scene.available)
+                .map((scene) => {
+                  const SceneIcon = scene.icon;
+                  return (
+                    <button
+                      type="button"
+                      className="kt-popup-scene"
+                      aria-pressed={scene.enabled}
+                      key={scene.key}
+                      onClick={() => void scene.onChange(!scene.enabled)}
+                    >
+                      <SceneIcon />
+                      <span className="kt-popup-scene__copy">
+                        <span
+                          className="kt-popup-scene__label"
+                          title={scene.label}
+                        >
+                          {scene.label}
+                        </span>
+                        <span className="kt-popup-scene__state">
+                          {i18n(
+                            scene.enabled ? "popup_enabled" : "popup_disabled"
+                          )}
+                        </span>
                       </span>
-                      <span className="kt-popup-scene__state">
-                        {i18n(
-                          scene.enabled ? "popup_enabled" : "popup_disabled"
-                        )}
-                      </span>
-                    </span>
-                  </button>
-                );
-              })}
+                    </button>
+                  );
+                })}
             </div>
-            <div>
-              <div className="kt-popup-section-label">
-                {i18n("text_style_alt")}
-              </div>
-              <div className="kt-popup-style-chips">
-                {visiblePopupTextStyles.map(renderPopupStyleChip)}
-                {allTextStyles.length > 5 && (
-                  <button
-                    type="button"
-                    className="kt-popup-style-chip kt-popup-style-more"
-                    aria-label={styleDisclosureLabel}
-                    aria-expanded={showAllStyles}
-                    title={styleDisclosureLabel}
-                    onClick={() => setShowAllStyles((current) => !current)}
-                  >
-                    {showAllStyles
-                      ? i18n("popup_collapse")
-                      : `+${hiddenStyleCount}`}
-                    <ExpandMoreRoundedIcon aria-hidden="true" />
-                  </button>
-                )}
-              </div>
-            </div>
-            <div className="kt-popup-advanced-grid">
-              {advancedRows.map(([name, label, checked]) => (
-                <div className="kt-popup-advanced-row" key={name}>
-                  <span>{label}</span>
-                  <Switch
-                    size="small"
-                    checked={checked}
-                    onChange={(event) =>
-                      putRuleValue(
-                        name,
-                        name === "isPlainText"
-                          ? event.target.checked
-                          : event.target.checked
-                            ? "true"
-                            : "false"
-                      )
-                    }
-                    inputProps={{ "aria-label": label }}
-                  />
+            {canTranslatePage && (
+              <div>
+                <div className="kt-popup-section-label">
+                  {i18n("text_style_alt")}
                 </div>
-              ))}
-            </div>
-            <div className="kt-popup-advanced-row">
-              <span>{i18n("autoscan_alt")}</span>
-              <Switch
-                size="small"
-                checked={autoScan === "true"}
-                onChange={(event) =>
-                  putRuleValue(
-                    "autoScan",
-                    event.target.checked ? "true" : "false"
-                  )
-                }
-                inputProps={{ "aria-label": i18n("autoscan_alt") }}
-              />
-            </div>
-            <div className="kt-popup-advanced-tools">
-              <Button
-                variant="outlined"
-                onClick={async () => {
-                  if (processActions) {
-                    processActions({ action: MSG_RULE_EDITOR });
-                  } else {
-                    await sendTabMsg(MSG_RULE_EDITOR);
-                    window.close();
+                <div className="kt-popup-style-chips">
+                  {visiblePopupTextStyles.map(renderPopupStyleChip)}
+                  {allTextStyles.length > 5 && (
+                    <button
+                      type="button"
+                      className="kt-popup-style-chip kt-popup-style-more"
+                      aria-label={styleDisclosureLabel}
+                      aria-expanded={showAllStyles}
+                      title={styleDisclosureLabel}
+                      onClick={() => setShowAllStyles((current) => !current)}
+                    >
+                      {showAllStyles
+                        ? i18n("popup_collapse")
+                        : `+${hiddenStyleCount}`}
+                      <ExpandMoreRoundedIcon aria-hidden="true" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+            {canTranslatePage && (
+              <div className="kt-popup-advanced-grid">
+                {advancedRows.map(([name, label, checked]) => (
+                  <div className="kt-popup-advanced-row" key={name}>
+                    <span>{label}</span>
+                    <Switch
+                      size="small"
+                      checked={checked}
+                      onChange={(event) =>
+                        putRuleValue(
+                          name,
+                          name === "isPlainText"
+                            ? event.target.checked
+                            : event.target.checked
+                              ? "true"
+                              : "false"
+                        )
+                      }
+                      inputProps={{ "aria-label": label }}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+            {canTranslatePage && (
+              <div className="kt-popup-advanced-row">
+                <span>{i18n("autoscan_alt")}</span>
+                <Switch
+                  size="small"
+                  checked={autoScan === "true"}
+                  onChange={(event) =>
+                    putRuleValue(
+                      "autoScan",
+                      event.target.checked ? "true" : "false"
+                    )
                   }
-                }}
-              >
-                {i18n("rule_editor_open")}
-              </Button>
+                  inputProps={{ "aria-label": i18n("autoscan_alt") }}
+                />
+              </div>
+            )}
+            <div className="kt-popup-advanced-tools">
+              {canEditRule && (
+                <Button variant="outlined" onClick={handleOpenRuleEditor}>
+                  {i18n("rule_editor_open")}
+                </Button>
+              )}
               <Button
                 variant="text"
                 startIcon={<DeleteSweepRoundedIcon />}

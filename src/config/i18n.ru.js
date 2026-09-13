@@ -599,6 +599,8 @@ export const RU_I18N = {
   show_dot_disable: `Отключить`,
   rule_disabled: `Правило отключено`,
   rule_enabled: `Правило включено`,
+  popup_action_failed: `Не удалось применить изменение на странице. Попробуйте ещё раз.`,
+  popup_unavailable: `Недоступно на этой странице`,
   rule_toggle_failed: `Не удалось переключить правило`,
   seg_trans_diff_warning: `Движки разбиения и перевода различаются; субтитры будут переведены заново.`,
   subtitle_style_preview: `Предпросмотр стиля`,

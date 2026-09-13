@@ -39,7 +39,7 @@ import {
 } from "../../libs/client";
 import { readClipboardTextIfAllowed } from "../../libs/clipboard";
 import { POPUP_STYLES } from "./styles";
-import { loadPopupData } from "./loadData";
+import { usePopupPage } from "./usePopupPage";
 import { REVIEW_URL, SUPPORT_URL } from "./supportLinks";
 
 /**
@@ -368,11 +368,42 @@ export function Trantab({ isSeparate = false }) {
 
 export default function Popup() {
   const i18n = useI18n();
-  const [rule, setRule] = useState(null);
-  const [setting, setSetting] = useState(null);
-  const [isLoading, setIsLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("page");
-  const [isSeparate, setIsSeparate] = useState(false);
+  const [isSeparate] = useState(() => window.location.hash === "#tranbox");
+  const previewData = useMemo(() => {
+    if (
+      process.env.NODE_ENV !== "development" ||
+      !new URLSearchParams(window.location.search).has("preview")
+    ) {
+      return null;
+    }
+    return {
+      rule: { ...GLOBLA_RULE, transOpen: "true", textStyle: "dash_line" },
+      setting: {
+        ...DEFAULT_SETTING,
+        uiLang: "zh",
+        darkMode: "light",
+        tranboxSetting: { ...DEFAULT_SETTING.tranboxSetting, transOpen: true },
+        mouseHoverSetting: {
+          ...DEFAULT_SETTING.mouseHoverSetting,
+          useMouseHover: true,
+        },
+      },
+    };
+  }, []);
+  const {
+    data,
+    tab,
+    generation,
+    isLoading,
+    setRule,
+    setSetting,
+    markUnavailable,
+  } = usePopupPage({
+    enabled: !isSeparate && !previewData,
+    initialData: previewData,
+  });
+  const { rule, setting, capabilities, isTopFrame } = data || {};
   const popupShellRef = useRef(null);
   const initialFocusGuardRef = useRef(true);
 
@@ -420,55 +451,6 @@ export default function Popup() {
 
   const handleOpenSetting = useCallback(() => {
     sendBgMsg(MSG_OPEN_OPTIONS);
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-    (async () => {
-      try {
-        const previewMode =
-          process.env.NODE_ENV === "development" &&
-          new URLSearchParams(window.location.search).has("preview");
-        if (previewMode) {
-          setRule({
-            ...GLOBLA_RULE,
-            transOpen: "true",
-            textStyle: "dash_line",
-          });
-          setSetting({
-            ...DEFAULT_SETTING,
-            uiLang: "zh",
-            darkMode: "light",
-            tranboxSetting: {
-              ...DEFAULT_SETTING.tranboxSetting,
-              transOpen: true,
-            },
-            mouseHoverSetting: {
-              ...DEFAULT_SETTING.mouseHoverSetting,
-              useMouseHover: true,
-            },
-          });
-          return;
-        }
-        const cleanHash = window.location.hash.slice(1);
-        if (cleanHash === "tranbox") {
-          if (active) setIsSeparate(true);
-          return;
-        }
-        const response = await loadPopupData();
-        if (active && response && !response.error) {
-          setRule(response.rule);
-          setSetting(response.setting);
-        }
-      } catch (error) {
-        kissLog("query rule", error);
-      } finally {
-        if (active) setIsLoading(false);
-      }
-    })();
-    return () => {
-      active = false;
-    };
   }, []);
 
   const openSeparateWindow = useCallback(() => {
@@ -549,6 +531,11 @@ export default function Popup() {
           <Trantab />
         ) : rule && setting ? (
           <PopupCont
+            key={generation}
+            targetTab={tab}
+            onPageUnavailable={markUnavailable}
+            capabilities={capabilities}
+            isTopFrame={isTopFrame}
             rule={rule}
             setting={setting}
             setRule={setRule}
