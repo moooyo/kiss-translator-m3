@@ -46,6 +46,7 @@ export async function isCurrentPopupDocument(tabId, documentInfo) {
     // injection through tabs.executeScript. Still verify the exact frame token.
     const [result] = await browser.tabs.executeScript(tabId, {
       frameId: documentInfo.frameId,
+      matchAboutBlank: true,
       runAt: "document_start",
       code: `(${getPopupDocumentIdentity.toString()})()`,
     });

@@ -275,20 +275,163 @@ describe("usePopupPage tab lifecycle", () => {
   });
 
   test("clears unavailable receivers and invalidates their pending action setters", async () => {
+    loadPopupData.mockResolvedValueOnce(data()).mockResolvedValue(undefined);
     const view = renderPage();
     await flushEffects();
     const { generation, setRule, setSetting, markUnavailable } = view.page;
 
     act(() => markUnavailable());
     expect(view.page.data).toBeNull();
-    expect(view.page.isLoading).toBe(false);
+    expect(view.page.isLoading).toBe(true);
     expect(view.page.generation).toBeGreaterThan(generation);
     act(() => {
       setRule({ transOpen: "true" });
       setSetting({ darkMode: "dark" });
     });
     expect(view.page.data).toBeNull();
+    await flushEffects();
+    expect(view.page.data).toBeNull();
+    expect(view.page.isLoading).toBe(false);
   });
+
+  test("discovers a surviving frame without accepting the removed frame's callbacks", async () => {
+    const recovery = deferred();
+    loadPopupData
+      .mockResolvedValueOnce({
+        ...data(),
+        document: { token: "removed", frameId: 7 },
+      })
+      .mockReturnValueOnce(recovery.promise);
+    const view = renderPage();
+    await flushEffects();
+    const previous = view.page;
+
+    act(() => {
+      previous.markUnavailable();
+      previous.markUnavailable();
+    });
+    expect(view.page.data).toBeNull();
+    expect(view.page.generation).toBeGreaterThan(previous.generation);
+    expect(loadPopupData).toHaveBeenCalledTimes(2);
+    expect(loadPopupData).toHaveBeenLastCalledWith({ tabId: 17 });
+    recovery.resolve({
+      ...data("fr"),
+      document: { token: "surviving", frameId: 11 },
+    });
+    await flushEffects();
+    const recoveredGeneration = view.page.generation;
+    act(() => {
+      previous.setRule({ toLang: "stale" });
+      previous.setSetting({ darkMode: "stale" });
+      previous.markUnavailable();
+    });
+    expect(view.page.data.rule.toLang).toBe("fr");
+    expect(view.page.data.setting).toEqual(data().setting);
+    expect(view.page.data.document).toEqual({
+      token: "surviving",
+      frameId: 11,
+    });
+    expect(view.page.generation).toBe(recoveredGeneration);
+    expect(loadPopupData).toHaveBeenCalledTimes(2);
+    expect(getCurTab).toHaveBeenCalledTimes(1);
+  });
+
+  test("settles a failed receiver recovery without retrying a stale loading tab", async () => {
+    jest.useFakeTimers();
+    try {
+      getCurTab.mockResolvedValue(tab(17, { status: "loading" }));
+      loadPopupData
+        .mockResolvedValueOnce({
+          ...data(),
+          document: { token: "removed", frameId: 7 },
+        })
+        .mockResolvedValue(undefined);
+      const view = renderPage();
+      await flushEffects();
+      act(() => view.page.markUnavailable());
+      await flushEffects();
+      expect(view.page.data).toBeNull();
+      expect(view.page.isLoading).toBe(false);
+      act(() => jest.advanceTimersByTime(2000));
+      await flushEffects();
+      expect(loadPopupData).toHaveBeenCalledTimes(2);
+      expect(isCurrentPopupDocument).not.toHaveBeenCalled();
+      view.unmount();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("recovers using a completion event's latest tab snapshot before its validation settles", async () => {
+    jest.useFakeTimers();
+    try {
+      getCurTab.mockResolvedValue(tab(17, { status: "loading" }));
+      loadPopupData
+        .mockResolvedValueOnce({
+          ...data(),
+          document: { token: "removed", frameId: 7 },
+        })
+        .mockResolvedValue({
+          ...data("fr"),
+          document: { token: "surviving", frameId: 11 },
+        });
+      const completion = deferred();
+      isCurrentPopupDocument.mockReturnValueOnce(completion.promise);
+      const view = renderPage();
+      await flushEffects();
+      updateTab({ status: "complete" });
+      act(() => view.page.markUnavailable());
+      await flushEffects();
+      expect(view.page.tab.status).toBe("complete");
+      expect(view.page.data.document.token).toBe("surviving");
+      const generation = view.page.generation;
+      completion.resolve(false);
+      await flushEffects();
+      act(() => jest.advanceTimersByTime(2000));
+      await flushEffects();
+      expect(view.page.generation).toBe(generation);
+      expect(view.page.data.rule.toLang).toBe("fr");
+      expect(loadPopupData).toHaveBeenCalledTimes(2);
+      expect(isCurrentPopupDocument).toHaveBeenCalledTimes(1);
+      view.unmount();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test.each(["navigation", "activation", "removal"])(
+    "ignores receiver recovery after a newer tab %s",
+    async (event) => {
+      const recovery = deferred();
+      loadPopupData
+        .mockResolvedValueOnce(data())
+        .mockReturnValueOnce(recovery.promise)
+        .mockResolvedValue(data("fr"));
+      browser.tabs.get.mockResolvedValue(tab(29));
+      const view = renderPage();
+      await flushEffects();
+      act(() => view.page.markUnavailable());
+      if (event === "navigation") {
+        updateTab({ url: "https://example.com/new", status: "complete" });
+      } else {
+        act(() => {
+          if (event === "activation") {
+            browser.tabs.onActivated.emit({ tabId: 29, windowId: 3 });
+          } else {
+            browser.tabs.onRemoved.emit(17);
+          }
+        });
+      }
+      await flushEffects();
+      const current = view.page;
+      recovery.resolve(data("stale"));
+      await flushEffects();
+      expect(view.page.generation).toBe(current.generation);
+      expect(view.page.tab).toEqual(current.tab);
+      expect(view.page.data).toEqual(event === "removal" ? null : data("fr"));
+      expect(view.page.isLoading).toBe(false);
+    }
+  );
 
   test("retargets activation in its window while ignoring other windows", async () => {
     loadPopupData
@@ -433,6 +576,175 @@ describe("usePopupPage tab lifecycle", () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  test("child-frame loading and completion preserve the displayed document and its edits", async () => {
+    loadPopupData.mockResolvedValue({
+      ...data(),
+      document: { token: "current", frameId: 0 },
+    });
+    const view = renderPage();
+    await flushEffects();
+    const previous = view.page;
+    act(() => {
+      previous.setRule((rule) => ({ ...rule, toLang: "de" }));
+      previous.setSetting((setting) => ({ ...setting, darkMode: "dark" }));
+    });
+    updateTab({ status: "loading" });
+    await flushEffects();
+    expect(view.page.tab.status).toBe("loading");
+    expect(view.page.generation).toBe(previous.generation);
+    expect(view.page.isLoading).toBe(false);
+    expect(view.page.data.rule.toLang).toBe("de");
+    expect(view.page.data.setting.darkMode).toBe("dark");
+    updateTab({ status: "complete" });
+    await flushEffects();
+    expect(view.page.generation).toBe(previous.generation);
+    expect(view.page.tab.status).toBe("complete");
+    expect(view.page.data.rule.toLang).toBe("de");
+    // An action that started before the child navigation still owns this page.
+    act(() => previous.setRule((rule) => ({ ...rule, transOpen: "true" })));
+    expect(view.page.data.rule.transOpen).toBe("true");
+    expect(loadPopupData).toHaveBeenCalledTimes(1);
+    expect(isCurrentPopupDocument).toHaveBeenCalledTimes(2);
+  });
+
+  test.each([
+    ["loading", "complete", true],
+    ["loading", "complete", false],
+    ["complete", "loading", true],
+    ["complete", "loading", false],
+  ])(
+    "ignores an older %s validation after %s is verified (old identity: %s)",
+    async (firstStatus, latestStatus, oldIdentity) => {
+      jest.useFakeTimers();
+      try {
+        loadPopupData.mockResolvedValue({
+          ...data(),
+          document: { token: "current", frameId: 0 },
+        });
+        const first = deferred();
+        const latest = deferred();
+        isCurrentPopupDocument
+          .mockReturnValueOnce(first.promise)
+          .mockReturnValueOnce(latest.promise);
+        const view = renderPage();
+        await flushEffects();
+        const generation = view.page.generation;
+        act(() => view.page.setRule((rule) => ({ ...rule, toLang: "de" })));
+        updateTab({ status: firstStatus });
+        updateTab({ status: latestStatus });
+        latest.resolve(true);
+        await flushEffects();
+        first.resolve(oldIdentity);
+        await flushEffects();
+        expect(view.page.generation).toBe(generation);
+        expect(view.page.tab.status).toBe(latestStatus);
+        expect(view.page.data.rule.toLang).toBe("de");
+        act(() => jest.advanceTimersByTime(250));
+        await flushEffects();
+        expect(loadPopupData).toHaveBeenCalledTimes(1);
+        expect(isCurrentPopupDocument).toHaveBeenCalledTimes(
+          latestStatus === "loading" ? 3 : 2
+        );
+        view.unmount();
+      } finally {
+        jest.useRealTimers();
+      }
+    }
+  );
+
+  test.each(["loading", "complete"])(
+    "ignores an obsolete watcher after a newer %s event verifies the document",
+    async (status) => {
+      jest.useFakeTimers();
+      try {
+        getCurTab.mockResolvedValue(tab(17, { status: "loading" }));
+        loadPopupData.mockResolvedValue({
+          ...data(),
+          document: { token: "current", frameId: 0 },
+        });
+        const pendingWatch = deferred();
+        isCurrentPopupDocument.mockReturnValueOnce(pendingWatch.promise);
+        const view = renderPage();
+        await flushEffects();
+        const generation = view.page.generation;
+        act(() => jest.advanceTimersByTime(250));
+        updateTab({ status });
+        await flushEffects();
+        pendingWatch.resolve(false);
+        await flushEffects();
+        expect(view.page.generation).toBe(generation);
+        expect(view.page.tab.status).toBe(status);
+        expect(loadPopupData).toHaveBeenCalledTimes(1);
+        act(() => jest.advanceTimersByTime(250));
+        await flushEffects();
+        expect(isCurrentPopupDocument).toHaveBeenCalledTimes(
+          status === "loading" ? 3 : 2
+        );
+        view.unmount();
+      } finally {
+        jest.useRealTimers();
+      }
+    }
+  );
+
+  test("continues watching a preserved loading document until its replacement commits", async () => {
+    jest.useFakeTimers();
+    try {
+      loadPopupData
+        .mockResolvedValueOnce({
+          ...data(),
+          document: { token: "old", frameId: 0 },
+        })
+        .mockResolvedValue({
+          ...data("fr"),
+          document: { token: "new", frameId: 0 },
+        });
+      const view = renderPage();
+      await flushEffects();
+      const previous = view.page;
+      updateTab({ status: "loading" });
+      await flushEffects();
+      expect(view.page.generation).toBe(previous.generation);
+      isCurrentPopupDocument.mockResolvedValueOnce(false);
+      act(() => jest.advanceTimersByTime(250));
+      await flushEffects();
+      expect(view.page.generation).toBeGreaterThan(previous.generation);
+      expect(view.page.data.document.token).toBe("new");
+      act(() => previous.setRule({ toLang: "stale" }));
+      expect(view.page.data.rule.toLang).toBe("fr");
+      view.unmount();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("invalidates a same-URL loading event when document verification detects a pending navigation", async () => {
+    loadPopupData
+      .mockResolvedValueOnce({
+        ...data(),
+        document: { token: "old", frameId: 0 },
+      })
+      .mockResolvedValue(undefined);
+    const view = renderPage();
+    await flushEffects();
+    const previous = view.page;
+    isCurrentPopupDocument.mockResolvedValueOnce(false);
+    updateTab(
+      { status: "loading" },
+      tab(17, { pendingUrl: tab().url, status: "loading" })
+    );
+    await flushEffects();
+    expect(isCurrentPopupDocument).toHaveBeenCalledWith(17, {
+      token: "old",
+      frameId: 0,
+    });
+    expect(view.page.generation).toBeGreaterThan(previous.generation);
+    expect(view.page.data).toBeNull();
+    expect(view.page.isLoading).toBe(true);
+    act(() => previous.setRule(data("stale").rule));
+    expect(view.page.data).toBeNull();
   });
 
   test("releases listeners on close and captures a new tab when reopened", async () => {

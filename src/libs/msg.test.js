@@ -77,4 +77,22 @@ describe("tab messaging targets", () => {
       "expectedDocumentToken"
     );
   });
+
+  test("selects a broadcast response without restricting command execution", async () => {
+    await sendTabMsg(
+      "toggle",
+      { enabled: true },
+      undefined,
+      29,
+      undefined,
+      "displayed-document"
+    );
+
+    expect(mockQuery).not.toHaveBeenCalled();
+    expect(mockSendMessage).toHaveBeenCalledWith(29, {
+      action: "toggle",
+      args: { enabled: true },
+      responseDocumentToken: "displayed-document",
+    });
+  });
 });

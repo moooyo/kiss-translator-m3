@@ -5,13 +5,11 @@ const mockTransboxArgs = [];
 const mockInputTranslatorInstances = [];
 const mockPopupInstances = [];
 const mockFabInstances = [];
+const mockPopupDocumentIdentity = jest.fn();
 const activeManagers = [];
 
 jest.mock("./popupDocument", () => ({
-  getPopupDocumentIdentity: () => ({
-    token: "current-document",
-    url: "https://example.com/page",
-  }),
+  getPopupDocumentIdentity: () => mockPopupDocumentIdentity(),
 }));
 
 jest.mock("./ruleEditorManager", () => ({
@@ -308,6 +306,11 @@ describe("TranslatorManager SPA lifecycle", () => {
     jest.useFakeTimers();
     document.documentElement.innerHTML = "<head></head><body></body>";
     jest.clearAllMocks();
+    mockPopupDocumentIdentity.mockReset();
+    mockPopupDocumentIdentity.mockReturnValue({
+      token: "current-document",
+      url: "https://example.com/page",
+    });
 
     mockTranslatorInstances.length = 0;
     mockTranslatorArgs.length = 0;
@@ -877,6 +880,163 @@ describe("TranslatorManager SPA lifecycle", () => {
     ).toBe("current-document");
   });
 
+  test.each([
+    "current-document",
+    "child-document",
+    "removed-document",
+    undefined,
+  ])(
+    "executes broadcasts in every frame and selects the reply for %s",
+    async (responseDocumentToken) => {
+      browser.runtime.sendMessage.mockResolvedValue(12);
+      createManager().start();
+      mockPopupDocumentIdentity.mockReturnValue({
+        token: "child-document",
+        url: "https://example.com/child",
+      });
+      createManager({ isIframe: true }).start();
+      await flushMutationObserver();
+
+      for (const [index, token] of [
+        "current-document",
+        "child-document",
+      ].entries()) {
+        const handler =
+          browser.runtime.onMessage.addListener.mock.calls[index][0];
+        const reply = jest.fn();
+        const selected =
+          !responseDocumentToken || responseDocumentToken === token;
+        expect(
+          handler(
+            {
+              action: "trans-toggle",
+              args: { enabled: true },
+              responseDocumentToken,
+            },
+            {},
+            reply
+          )
+        ).toBe(selected);
+        expect(reply).toHaveBeenCalledTimes(selected ? 1 : 0);
+        if (selected) {
+          expect(reply).toHaveBeenCalledWith(
+            expect.objectContaining({
+              document: expect.objectContaining({ token }),
+            })
+          );
+        }
+        expect(mockTranslatorInstances[index].enable).toHaveBeenCalledTimes(1);
+      }
+      expect(sendIframeMsg).not.toHaveBeenCalled();
+    }
+  );
+
+  test.each([
+    { selected: true, throws: true },
+    { selected: false, throws: true },
+    { selected: true, throws: false },
+    { selected: false, throws: false },
+  ])(
+    "only the selected document reports command errors (selected: $selected, throws: $throws)",
+    ({ selected, throws }) => {
+      const manager = createManager({ isIframe: true });
+      manager.start();
+      mockTranslatorInstances[0].enable.mockImplementation(() => {
+        throw new Error("Translation initialization failed.");
+      });
+      const handler = browser.runtime.onMessage.addListener.mock.calls[0][0];
+      const reply = jest.fn();
+
+      expect(
+        handler(
+          {
+            action: throws ? "trans-toggle" : "transinput-toggle",
+            args: { enabled: true },
+            responseDocumentToken: selected
+              ? "current-document"
+              : "another-document",
+          },
+          {},
+          reply
+        )
+      ).toBe(selected);
+      expect(reply).toHaveBeenCalledTimes(selected ? 1 : 0);
+      if (selected) {
+        expect(reply).toHaveBeenCalledWith({
+          error: throws
+            ? "Translation initialization failed."
+            : "Message action is unavailable in this frame: transinput-toggle",
+        });
+      }
+      expect(mockTranslatorInstances[0].enable).toHaveBeenCalledTimes(
+        throws ? 1 : 0
+      );
+    }
+  );
+
+  test.each([true, false])(
+    "only the selected document reports an inactive runtime (selected: %s)",
+    (selected) => {
+      const manager = createManager();
+      manager.start();
+      const handler = browser.runtime.onMessage.addListener.mock.calls[0][0];
+      manager.stop();
+      const reply = jest.fn();
+
+      expect(
+        handler(
+          {
+            action: "trans-toggle",
+            args: { enabled: true },
+            responseDocumentToken: selected
+              ? "current-document"
+              : "another-document",
+          },
+          {},
+          reply
+        )
+      ).toBe(selected);
+      expect(reply).toHaveBeenCalledTimes(selected ? 1 : 0);
+      if (selected) {
+        expect(reply).toHaveBeenCalledWith({
+          error: "The requested runtime is no longer active.",
+          code: "STALE_DOCUMENT",
+        });
+      }
+      expect(mockTranslatorInstances[0].enable).not.toHaveBeenCalled();
+    }
+  );
+
+  test.each([true, false])(
+    "does not claim a routed query while another child identity is pending (stopped: %s)",
+    async (stopped) => {
+      let resolveFrameId;
+      browser.runtime.sendMessage.mockReturnValue(
+        new Promise((resolve) => {
+          resolveFrameId = resolve;
+        })
+      );
+      const manager = createManager({ isIframe: true });
+      manager.start();
+      const handler = browser.runtime.onMessage.addListener.mock.calls[0][0];
+      const reply = jest.fn();
+      expect(
+        handler(
+          {
+            action: "trans-getrule",
+            responseDocumentToken: "another-document",
+          },
+          {},
+          reply
+        )
+      ).toBe(false);
+      if (stopped) manager.stop();
+      resolveFrameId(12);
+      await flushMutationObserver();
+      expect(reply).not.toHaveBeenCalled();
+    }
+  );
+
   test("uses the background's frame ID for a child document", async () => {
     browser.runtime.sendMessage.mockResolvedValue(12);
     const manager = createManager({ isIframe: true });
@@ -892,9 +1052,14 @@ describe("TranslatorManager SPA lifecycle", () => {
     });
   });
 
-  test.each([false, true])(
-    "waits for child identity before answering a snapshot (stopped: %s)",
-    async (stopped) => {
+  test.each([
+    { stopped: false, responseDocumentToken: undefined },
+    { stopped: true, responseDocumentToken: undefined },
+    { stopped: false, responseDocumentToken: "current-document" },
+    { stopped: true, responseDocumentToken: "current-document" },
+  ])(
+    "waits for child identity before answering a snapshot (stopped: $stopped, response token: $responseDocumentToken)",
+    async ({ stopped, responseDocumentToken }) => {
       let resolveFrameId;
       browser.runtime.sendMessage.mockReturnValue(
         new Promise((resolve) => {
@@ -907,10 +1072,14 @@ describe("TranslatorManager SPA lifecycle", () => {
       const reply = jest.fn();
       const response = new Promise((resolve) => {
         expect(
-          handler({ action: "trans-getrule" }, {}, (value) => {
-            reply(value);
-            resolve(value);
-          })
+          handler(
+            { action: "trans-getrule", responseDocumentToken },
+            {},
+            (value) => {
+              reply(value);
+              resolve(value);
+            }
+          )
         ).toBe(true);
       });
       expect(reply).not.toHaveBeenCalled();

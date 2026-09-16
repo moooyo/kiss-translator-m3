@@ -38,6 +38,8 @@ export const sendBgMsg = (action, args) =>
  * @param {Object} args Message arguments.
  * @param {Object} options Browser message options, such as frameId.
  * @param {number} targetTabId The tab whose state initiated this operation.
+ * @param {string} expectedDocumentToken Restrict execution to this document.
+ * @param {string} responseDocumentToken Select the responding document only.
  * @returns {Promise<*>} Content-script response.
  */
 export const sendTabMsg = async (
@@ -45,7 +47,8 @@ export const sendTabMsg = async (
   args,
   options,
   targetTabId,
-  expectedDocumentToken
+  expectedDocumentToken,
+  responseDocumentToken
 ) => {
   const tabId = targetTabId ?? (await getCurTabId());
   if (tabId == null) return;
@@ -54,6 +57,8 @@ export const sendTabMsg = async (
   const message = { action, args };
   if (expectedDocumentToken)
     message.expectedDocumentToken = expectedDocumentToken;
+  if (responseDocumentToken)
+    message.responseDocumentToken = responseDocumentToken;
   const sendPromise = options
     ? browser.tabs.sendMessage(tabId, message, options)
     : browser.tabs.sendMessage(tabId, message);

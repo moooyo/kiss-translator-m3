@@ -60,6 +60,8 @@ export default class TranslatorManager {
   #isUserscript;
   #isIframe;
   #transboxOnly;
+  // Reply routing must work before a child receives its frame ID.
+  #documentToken = null;
   #documentInfo = null;
   #documentReady = null;
 
@@ -357,6 +359,7 @@ export default class TranslatorManager {
   #initializeDocumentInfo() {
     if (this.#isUserscript) return;
     const identity = getPopupDocumentIdentity();
+    this.#documentToken = identity.token;
     if (!this.#isIframe) {
       this.#documentInfo = { ...identity, frameId: 0 };
       return;
@@ -654,32 +657,44 @@ export default class TranslatorManager {
    * 处理扩展 background 发送的 runtime 消息。
    */
   #handleBrowserMessage(message, sender, sendResponse) {
-    const respond = () => {
+    const shouldRespond =
+      !message.responseDocumentToken ||
+      message.responseDocumentToken === this.#documentToken;
+    const respond = (response) => {
+      if (shouldRespond) sendResponse(response);
+    };
+    const processMessage = () => {
       try {
         if (!this.#isActive) {
-          sendResponse({
+          respond({
             error: "The requested runtime is no longer active.",
             code: "STALE_DOCUMENT",
           });
           return;
         }
         const result = this.#processActions(message, true);
-        sendResponse(result || this.#getRuntimeResponse());
+        respond(result || this.#getRuntimeResponse());
       } catch (error) {
-        sendResponse({ error: error?.message || String(error) });
+        respond({ error: error?.message || String(error) });
       }
     };
-    if (message.action === MSG_TRANS_GETRULE && !this.#documentInfo) {
+    if (
+      shouldRespond &&
+      message.action === MSG_TRANS_GETRULE &&
+      !this.#documentInfo
+    ) {
       if (!this.#documentReady) this.#initializeDocumentInfo();
       if (this.#documentReady) {
         // A child must not publish a usable-looking snapshot before the
         // background has supplied the frame ID needed to verify that document.
-        this.#documentReady.then(respond);
+        this.#documentReady.then(processMessage);
         return true;
       }
     }
-    respond();
-    return true;
+    processMessage();
+    // Every frame executes broadcasts, but only the selected document replies.
+    // Returning false synchronously keeps other frames from claiming the reply.
+    return shouldRespond;
   }
 
   /**

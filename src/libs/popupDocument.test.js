@@ -77,13 +77,19 @@ describe("popup document identity", () => {
   test("verifies the same token through the legacy MV2 injection API", async () => {
     const scripting = browser.scripting.executeScript;
     browser.scripting.executeScript = undefined;
-    browser.tabs.executeScript.mockResolvedValue([{ token: "document-one" }]);
+    browser.tabs.executeScript.mockImplementation(async (_tabId, options) => {
+      if (!options.matchAboutBlank) {
+        throw new Error("Missing host permission for the blank frame");
+      }
+      return [{ token: "document-one" }];
+    });
     try {
       await expect(isCurrentPopupDocument(17, documentInfo)).resolves.toBe(
         true
       );
       expect(browser.tabs.executeScript).toHaveBeenCalledWith(17, {
         frameId: 7,
+        matchAboutBlank: true,
         runAt: "document_start",
         code: expect.stringContaining("__KISS_TRANSLATOR_DOCUMENT_TOKEN__"),
       });

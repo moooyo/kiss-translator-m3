@@ -5,6 +5,8 @@ import PopupCont from "./PopupCont";
 import { getVisibleServices } from "./services";
 import { tryClearCaches } from "../../libs/cache";
 import { getCurTab } from "../../libs/msg";
+import { saveRule } from "../../libs/rules";
+import { isCurrentPopupDocument } from "../../libs/popupDocument";
 import {
   MSG_MOUSEHOVER_TOGGLE,
   MSG_RULE_EDITOR,
@@ -75,6 +77,9 @@ jest.mock("../../libs/log", () => ({
   kissLog: jest.fn(),
 }));
 jest.mock("../../libs/rules", () => ({ saveRule: jest.fn() }));
+jest.mock("../../libs/popupDocument", () => ({
+  isCurrentPopupDocument: jest.fn(async () => true),
+}));
 
 async function flushEffects() {
   await act(async () => {
@@ -160,6 +165,9 @@ function renderPopupCont(
 
   return {
     container,
+    rerender(nextProps) {
+      act(() => root.render(<PopupCont {...popupProps} {...nextProps} />));
+    },
     cleanup() {
       act(() => root.unmount());
       container.remove();
@@ -181,6 +189,8 @@ describe("PopupCont capability parity", () => {
     mockSendTopFrameMsg.mockReset();
     mockSendTopFrameMsg.mockResolvedValue(undefined);
     mockUpdateSetting.mockClear();
+    saveRule.mockClear();
+    isCurrentPopupDocument.mockResolvedValue(true);
     mockCss.mockClear();
   });
 
@@ -905,6 +915,186 @@ describe("PopupCont capability parity", () => {
     );
     view.cleanup();
   });
+
+  test("reports a routed execution error even if the runtime flag was changed", async () => {
+    const documentInfo = { token: "captured-document", frameId: 0 };
+    mockSendTabMsg.mockImplementation(async (action) =>
+      action === MSG_TRANS_GETRULE
+        ? {
+            rule: { transOpen: "true" },
+            setting: {},
+            document: documentInfo,
+          }
+        : { error: "Translation initialization failed" }
+    );
+    const view = renderPopupCont(
+      {
+        rule: { transOpen: "false" },
+        targetTab: { id: 42, url: "https://example.com/page" },
+        documentInfo,
+      },
+      { statefulRule: true }
+    );
+    try {
+      await flushEffects();
+      await act(async () =>
+        view.container.querySelector(".kt-popup-hero").click()
+      );
+      expect(mockSendTabMsg).toHaveBeenCalledTimes(1);
+      expect(mockSendTabMsg).toHaveBeenCalledWith(
+        MSG_TRANS_TOGGLE,
+        { enabled: true },
+        undefined,
+        42,
+        undefined,
+        documentInfo.token
+      );
+      expect(
+        view.container.querySelector('input[aria-label="popup_translate_page"]')
+          .checked
+      ).toBe(false);
+      expect(
+        view.container.querySelector('[role="alert"]').textContent
+      ).toContain("rule_toggle_failed");
+    } finally {
+      view.cleanup();
+    }
+  });
+
+  test("confirms a routed broadcast through the same captured document", async () => {
+    const documentInfo = { token: "captured-document", frameId: 7 };
+    mockSendTabMsg.mockResolvedValue({
+      rule: { transOpen: "true" },
+      setting: {},
+      document: documentInfo,
+    });
+    const view = renderPopupCont(
+      {
+        rule: { transOpen: "false" },
+        targetTab: { id: 42, url: "https://example.com/page" },
+        documentInfo,
+        isTopFrame: false,
+      },
+      { statefulRule: true }
+    );
+    try {
+      await flushEffects();
+      await act(async () =>
+        view.container.querySelector(".kt-popup-hero").click()
+      );
+      expect(mockSendTabMsg).toHaveBeenNthCalledWith(
+        1,
+        MSG_TRANS_TOGGLE,
+        { enabled: true },
+        undefined,
+        42,
+        undefined,
+        documentInfo.token
+      );
+      expect(mockSendTabMsg).toHaveBeenNthCalledWith(
+        2,
+        MSG_TRANS_GETRULE,
+        undefined,
+        { frameId: 7 },
+        42,
+        documentInfo.token
+      );
+      expect(
+        view.container.querySelector('input[aria-label="popup_translate_page"]')
+          .checked
+      ).toBe(true);
+      expect(view.container.querySelector('[role="alert"]')).toBeNull();
+    } finally {
+      view.cleanup();
+    }
+  });
+
+  test.each([false, true])(
+    "checks receiver availability after a closed reply channel without confirming the action: %s",
+    async (receiverAvailable) => {
+      const documentInfo = { token: "captured-document", frameId: 7 };
+      const onPageUnavailable = jest.fn();
+      mockSendTabMsg
+        .mockRejectedValueOnce(new Error("The message channel closed"))
+        .mockResolvedValue(
+          receiverAvailable
+            ? {
+                rule: { transOpen: "true" },
+                setting: {},
+                document: documentInfo,
+              }
+            : undefined
+        );
+      const view = renderPopupCont(
+        {
+          rule: { transOpen: "false" },
+          targetTab: { id: 42, url: "https://example.com/page" },
+          documentInfo,
+          onPageUnavailable,
+        },
+        { statefulRule: true }
+      );
+      try {
+        await flushEffects();
+        await act(async () =>
+          view.container.querySelector(".kt-popup-hero").click()
+        );
+        expect(mockSendTabMsg).toHaveBeenCalledTimes(2);
+        expect(onPageUnavailable).toHaveBeenCalledTimes(
+          receiverAvailable ? 0 : 1
+        );
+        expect(
+          view.container.querySelector(
+            'input[aria-label="popup_translate_page"]'
+          ).checked
+        ).toBe(false);
+        expect(
+          view.container.querySelector('[role="alert"]').textContent
+        ).toContain("rule_toggle_failed");
+      } finally {
+        view.cleanup();
+      }
+    }
+  );
+
+  test.each(["save", "blacklist"])(
+    "preserves the selected scope for %s after the same page finishes loading",
+    async (action) => {
+      const targetTab = {
+        id: 42,
+        url: "https://example.com/page",
+        status: "loading",
+      };
+      const view = renderPopupCont({ targetTab });
+      try {
+        await flushEffects();
+        const select = view.container.querySelector(".kt-popup-site__select");
+        act(() => {
+          select.value = "*.example.com";
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+        });
+        view.rerender({ targetTab: { ...targetTab, status: "complete" } });
+        await flushEffects();
+        expect(select.value).toBe("*.example.com");
+        const label = action === "save" ? "save_rule" : "add_to_blacklist";
+        await act(async () =>
+          [...view.container.querySelectorAll("button")]
+            .find((button) => button.textContent === label)
+            .click()
+        );
+        if (action === "save") {
+          expect(saveRule).toHaveBeenCalledWith(
+            expect.objectContaining({ pattern: "*.example.com" })
+          );
+        } else {
+          const update = mockUpdateSetting.mock.calls[0][0];
+          expect(update({ blacklist: "" }).blacklist).toBe("*.example.com");
+        }
+      } finally {
+        view.cleanup();
+      }
+    }
+  );
 
   test("keeps child-frame translation controls without top-frame tools", async () => {
     const view = renderPopupCont({

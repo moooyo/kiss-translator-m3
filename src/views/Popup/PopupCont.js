@@ -118,6 +118,8 @@ export default function PopupCont({
   const activeRef = useRef(true);
   const visibleRef = useRef(isVisible);
   const pageActionSequenceRef = useRef(0);
+  const hasTargetTab = targetTab != null;
+  const targetTabUrl = targetTab?.url;
   const canTranslatePage = capabilities?.pageTranslation !== false;
   const canEditRule = isTopFrame && capabilities?.ruleEditor !== false;
   const { allTextStyles } = useAllTextStyles();
@@ -193,7 +195,16 @@ export default function PopupCont({
           ? documentInfo?.frameId === 0
             ? sendTopFrameMsg(action, args, targetTab.id, documentInfo.token)
             : sendTopFrameMsg(action, args, targetTab.id)
-          : sendTabMsg(action, args, undefined, targetTab.id);
+          : documentInfo?.token
+            ? sendTabMsg(
+                action,
+                args,
+                undefined,
+                targetTab.id,
+                undefined,
+                documentInfo.token
+              )
+            : sendTabMsg(action, args, undefined, targetTab.id);
       }
       return topFrame
         ? args === undefined
@@ -212,10 +223,34 @@ export default function PopupCont({
         return response;
       }
       const sequence = ++pageActionSequenceRef.current;
-      const result = await sendPageMessage(action, args, topFrame);
-      if (topFrame && result?.error) throw new Error(result.error);
-      // Broadcast responses can come from any frame. Read the preferred
-      // frame again before confirming the state shown in this panel.
+      let result;
+      try {
+        result = await sendPageMessage(action, args, topFrame);
+      } catch (error) {
+        if (documentInfo) {
+          // A frame can disappear after receiving the command. A separate
+          // availability check may recover the panel, but cannot confirm it.
+          const current = await queryPopupData(
+            targetTab?.id,
+            documentInfo
+          ).catch(() => undefined);
+          if (current == null && sequence === pageActionSequenceRef.current) {
+            onPageUnavailable?.();
+          }
+        }
+        throw error;
+      }
+      if (result?.error) {
+        if (
+          result.code === "STALE_DOCUMENT" &&
+          sequence === pageActionSequenceRef.current
+        ) {
+          onPageUnavailable?.();
+        }
+        throw new Error(result.error);
+      }
+      // Only the selected document acknowledges a broadcast. Verify that it
+      // is still current before accepting its resulting state.
       const response = await queryPopupData(targetTab?.id, documentInfo);
       if (response == null && sequence === pageActionSequenceRef.current) {
         onPageUnavailable?.();
@@ -289,10 +324,6 @@ export default function PopupCont({
           enabled,
         });
         if (!activeRef.current) return;
-
-        if (response?.error) {
-          throw new Error(response.error);
-        }
 
         const responseTransOpen = response?.rule?.transOpen;
         const hasConfirmedState =
@@ -414,8 +445,8 @@ export default function PopupCont({
       try {
         const href = isContent
           ? window.location?.href
-          : targetTab
-            ? targetTab.url || ""
+          : hasTargetTab
+            ? targetTabUrl || ""
             : (await getCurTab())?.url || "";
         if (!active || !href) return;
         const options = getDomainOptions(href);
@@ -429,7 +460,7 @@ export default function PopupCont({
     return () => {
       active = false;
     };
-  }, [isContent, targetTab]);
+  }, [isContent, hasTargetTab, targetTabUrl]);
 
   const services = useMemo(
     () =>
