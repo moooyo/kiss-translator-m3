@@ -16,7 +16,6 @@ export function usePopupFeatureToggles({
   setting,
   setSetting,
   dispatchPageAction,
-  processActions,
   onError,
 }) {
   const value = useMemo(() => getFeatureValues(setting), [setting]);
@@ -49,11 +48,9 @@ export function usePopupFeatureToggles({
           { enabled },
           topFrame
         );
-        return processActions && response === undefined
-          ? { [name]: enabled }
-          : getFeatureValues(response?.setting);
+        return getFeatureValues(response?.setting);
       }),
-    [dispatchPageAction, processActions, update]
+    [dispatchPageAction, update]
   );
 
   return {

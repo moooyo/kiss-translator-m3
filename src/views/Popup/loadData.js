@@ -13,16 +13,10 @@ const withFrameSource = (response, isTopFrame) =>
     ? { ...response, isTopFrame }
     : response;
 
-const sendQuery = (tabId, topFrame) => {
-  if (tabId === undefined) {
-    return topFrame
-      ? sendTopFrameMsg(MSG_TRANS_GETRULE)
-      : sendTabMsg(MSG_TRANS_GETRULE);
-  }
-  return topFrame
+const sendQuery = (tabId, topFrame) =>
+  topFrame
     ? sendTopFrameMsg(MSG_TRANS_GETRULE, undefined, tabId)
     : sendTabMsg(MSG_TRANS_GETRULE, undefined, undefined, tabId);
-};
 
 async function trySend(sendMessage) {
   try {
@@ -32,10 +26,7 @@ async function trySend(sendMessage) {
   }
 }
 
-async function resolvePopupData(
-  response,
-  sendFallbackMessage = () => sendTabMsg(MSG_TRANS_GETRULE)
-) {
+async function resolvePopupData(response, sendFallbackMessage) {
   if (response != null) return withFrameSource(response, true);
 
   // A blocked top-level page can still contain an enabled child frame.
@@ -86,6 +77,6 @@ export async function loadPopupData({
   await wait(80);
   response = await verify(await trySend(sendMessage));
   return resolvePopupData(response, async () =>
-    verify(await trySend(sendFallbackMessage))
+    verify(await sendFallbackMessage())
   );
 }

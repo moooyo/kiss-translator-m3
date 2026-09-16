@@ -32,7 +32,11 @@ describe("loadPopupData", () => {
 
     await expect(loadPopupData()).resolves.toBe(popupData);
 
-    expect(mockSendTopFrameMsg).toHaveBeenCalledWith(MSG_TRANS_GETRULE);
+    expect(mockSendTopFrameMsg).toHaveBeenCalledWith(
+      MSG_TRANS_GETRULE,
+      undefined,
+      undefined
+    );
     expect(mockSendTopFrameMsg).toHaveBeenCalledTimes(1);
     expect(mockSendTabMsg).not.toHaveBeenCalled();
   });
@@ -71,7 +75,12 @@ describe("loadPopupData", () => {
 
     expect(mockSendTopFrameMsg).toHaveBeenCalledTimes(2);
     expect(mockSendTabMsg).toHaveBeenCalledTimes(1);
-    expect(mockSendTabMsg).toHaveBeenCalledWith(MSG_TRANS_GETRULE);
+    expect(mockSendTabMsg).toHaveBeenCalledWith(
+      MSG_TRANS_GETRULE,
+      undefined,
+      undefined,
+      undefined
+    );
     expect(mockSendTabMsg.mock.invocationCallOrder[0]).toBeGreaterThan(
       mockSendTopFrameMsg.mock.invocationCallOrder[1]
     );

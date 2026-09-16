@@ -103,9 +103,7 @@ export default function PopupCont({
     message: "",
     severity: "success",
   });
-  const [showAdvanced, setShowAdvanced] = useState(
-    capabilities?.pageTranslation === false
-  );
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [showAllServices, setShowAllServices] = useState(false);
   const [showAllStyles, setShowAllStyles] = useState(false);
   const [translationBusy, setTranslationBusy] = useState(false);
@@ -286,12 +284,10 @@ export default function PopupCont({
       ruleRef.current = { ...ruleRef.current, ...values };
       return updateRule(values, async () => {
         const response = await dispatchPageAction(MSG_TRANS_PUTRULE, values);
-        return processActions && response === undefined
-          ? values
-          : response?.rule;
+        return response?.rule;
       });
     },
-    [canTranslatePage, dispatchPageAction, processActions, updateRule]
+    [canTranslatePage, dispatchPageAction, updateRule]
   );
 
   const putRuleValue = useCallback(
@@ -332,28 +328,19 @@ export default function PopupCont({
           responseTransOpen === "true" ||
           responseTransOpen === "false";
 
-        // Direct page actions intentionally return void. A completed call is
-        // sufficient confirmation there; tab messages require an explicit
-        // state because the browser may otherwise have had no receiver.
-        if (!processActions && !hasConfirmedState) {
-          throw new Error("Page translation state was not confirmed");
-        }
-        if (processActions && response !== undefined && !hasConfirmedState) {
+        if (!hasConfirmedState) {
           throw new Error("Page translation state was not confirmed");
         }
 
-        const resolvedEnabled = hasConfirmedState
-          ? responseTransOpen === true || responseTransOpen === "true"
-          : enabled;
-        if (hasConfirmedState && resolvedEnabled !== enabled) {
+        const resolvedEnabled =
+          responseTransOpen === true || responseTransOpen === "true";
+        if (resolvedEnabled !== enabled) {
           throw new Error("Page translation state did not match the request");
         }
-        if (hasConfirmedState) {
-          setRule((previous) => ({
-            ...previous,
-            transOpen: resolvedEnabled ? "true" : "false",
-          }));
-        }
+        setRule((previous) => ({
+          ...previous,
+          transOpen: resolvedEnabled ? "true" : "false",
+        }));
 
         // The card already shows successful state changes. Reserve snackbars
         // for failures so they do not obscure the other translation controls.
@@ -383,7 +370,6 @@ export default function PopupCont({
       canTranslatePage,
       dispatchPageAction,
       i18n,
-      processActions,
       rule?.transOpen,
       setRule,
       showMessage,
@@ -395,7 +381,6 @@ export default function PopupCont({
       setting,
       setSetting,
       dispatchPageAction,
-      processActions,
       onError: reportActionFailure,
     });
 
@@ -406,11 +391,7 @@ export default function PopupCont({
         ? await processActions({ action: MSG_RULE_EDITOR })
         : await sendPageMessage(MSG_RULE_EDITOR, undefined, true);
       if (!activeRef.current || !visibleRef.current) return;
-      if (
-        response?.error ||
-        (!(processActions && response === undefined) &&
-          response?.ruleEditorOpened !== true)
-      ) {
+      if (response?.error || response?.ruleEditorOpened !== true) {
         throw new Error(response?.error || "Rule editor did not open");
       }
       if (!processActions) window.close();

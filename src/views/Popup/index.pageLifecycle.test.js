@@ -188,29 +188,7 @@ describe("Page controls retained across text-tab navigation", () => {
     }
   );
 
-  test("keeps a confirmed success after the same text-tab round trip", async () => {
-    const pending = deferred();
-    mockQueryPopupData.mockReturnValueOnce(pending.promise);
-    act(() => root.render(<Popup />));
-    await flush();
-    const mainSwitch = () =>
-      container.querySelector('input[aria-label="popup_translate_page"]');
-    act(() => mainSwitch().click());
-    await flush();
-    act(() => container.querySelector("#kt-popup-text-tab").click());
-    await flush();
-    await act(async () => {
-      pending.resolve({
-        ...mockPayload,
-        rule: { ...mockRule, transOpen: "true" },
-      });
-    });
-    act(() => container.querySelector("#kt-popup-page-tab").click());
-    await flush();
-    expect(mainSwitch().checked).toBe(true);
-  });
-
-  test("keeps one action sequence and pending gate across a text-tab round trip", async () => {
+  test("keeps the pending gate and hidden success across text-tab round trips", async () => {
     const pending = deferred();
     mockQueryPopupData
       .mockReturnValueOnce(pending.promise)
@@ -230,6 +208,10 @@ describe("Page controls retained across text-tab navigation", () => {
     act(() => mainSwitch().click());
     await flush();
     expect(mockQueryPopupData).toHaveBeenCalledTimes(1);
+    expect(mockSendTabMsg).toHaveBeenCalledTimes(1);
+    act(() => container.querySelector("#kt-popup-text-tab").click());
+    await flush();
+    expect(container.querySelector("#kt-popup-page-panel").hidden).toBe(true);
     await act(async () => {
       pending.resolve({
         ...mockPayload,
@@ -237,6 +219,9 @@ describe("Page controls retained across text-tab navigation", () => {
       });
     });
     await flush();
+    act(() => container.querySelector("#kt-popup-page-tab").click());
+    await flush();
+    expect(mainSwitch().checked).toBe(true);
     expect(mainSwitch().disabled).toBe(false);
     act(() => mainSwitch().click());
     await flush();

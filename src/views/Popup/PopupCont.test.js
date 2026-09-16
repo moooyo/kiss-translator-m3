@@ -200,7 +200,7 @@ describe("PopupCont capability parity", () => {
   });
 
   test("opens the rule editor from the content popup without closing the page", async () => {
-    const processActions = jest.fn();
+    const processActions = jest.fn(() => ({ ruleEditorOpened: true }));
     const closeWindow = jest
       .spyOn(window, "close")
       .mockImplementation(() => {});
@@ -216,6 +216,7 @@ describe("PopupCont capability parity", () => {
       expect(processActions).toHaveBeenCalledWith({ action: MSG_RULE_EDITOR });
       expect(mockSendTabMsg).not.toHaveBeenCalled();
       expect(closeWindow).not.toHaveBeenCalled();
+      expect(view.container.querySelector('[role="alert"]')).toBeNull();
     } finally {
       view.cleanup();
       closeWindow.mockRestore();
@@ -306,7 +307,11 @@ describe("PopupCont capability parity", () => {
   });
 
   test("keeps consecutive content swaps current and preserves single-field actions", async () => {
-    const processActions = jest.fn();
+    let rule = { fromLang: "en", toLang: "fr" };
+    const processActions = jest.fn(({ args }) => {
+      rule = { ...rule, ...args };
+      return { rule };
+    });
     const view = renderPopupCont(
       { rule: { fromLang: "en", toLang: "fr" }, processActions },
       { statefulRule: true }
@@ -314,7 +319,7 @@ describe("PopupCont capability parity", () => {
     await flushEffects();
     const swap = view.container.querySelector(".kt-popup-swap");
 
-    act(() => {
+    await act(async () => {
       swap.click();
       swap.click();
     });
@@ -334,13 +339,16 @@ describe("PopupCont capability parity", () => {
       ).map((input) => input.value)
     ).toEqual(["en", "fr"]);
 
-    act(() => view.container.querySelector(".kt-popup-service").click());
+    await act(async () =>
+      view.container.querySelector(".kt-popup-service").click()
+    );
     expect(processActions).toHaveBeenCalledTimes(3);
     expect(processActions).toHaveBeenLastCalledWith({
       action: MSG_TRANS_PUTRULE,
       args: { apiSlug: "google" },
     });
     expect(mockSendTabMsg).not.toHaveBeenCalled();
+    expect(view.container.querySelector('[role="alert"]')).toBeNull();
     view.cleanup();
   });
 
@@ -567,9 +575,10 @@ describe("PopupCont capability parity", () => {
   });
 
   test("dispatches one explicit page translation state from the main switch", async () => {
-    const processActions = jest.fn();
-    const setRule = jest.fn();
-    const view = renderPopupCont({ processActions, setRule });
+    const processActions = jest.fn(({ args }) => ({
+      rule: { transOpen: args.enabled ? "true" : "false" },
+    }));
+    const view = renderPopupCont({ processActions }, { statefulRule: true });
     await flushEffects();
 
     const mainSwitch = view.container.querySelector(
@@ -585,7 +594,8 @@ describe("PopupCont capability parity", () => {
       action: MSG_TRANS_TOGGLE,
       args: { enabled: false },
     });
-    expect(setRule).toHaveBeenCalledTimes(1);
+    expect(mainSwitch.checked).toBe(false);
+    expect(view.container.querySelector('[role="alert"]')).toBeNull();
     view.cleanup();
   });
 
@@ -706,7 +716,11 @@ describe("PopupCont capability parity", () => {
     expect(mockSendTabMsg).toHaveBeenCalledWith(MSG_TRANS_TOGGLE, {
       enabled: false,
     });
-    expect(mockSendTopFrameMsg).toHaveBeenCalledWith(MSG_TRANS_GETRULE);
+    expect(mockSendTopFrameMsg).toHaveBeenCalledWith(
+      MSG_TRANS_GETRULE,
+      undefined,
+      undefined
+    );
     view.cleanup();
   });
 
@@ -762,8 +776,17 @@ describe("PopupCont capability parity", () => {
     });
     await flushEffects();
 
-    expect(mockSendTopFrameMsg).toHaveBeenCalledWith(MSG_TRANS_GETRULE);
-    expect(mockSendTabMsg).toHaveBeenCalledWith(MSG_TRANS_GETRULE);
+    expect(mockSendTopFrameMsg).toHaveBeenCalledWith(
+      MSG_TRANS_GETRULE,
+      undefined,
+      undefined
+    );
+    expect(mockSendTabMsg).toHaveBeenCalledWith(
+      MSG_TRANS_GETRULE,
+      undefined,
+      undefined,
+      undefined
+    );
     expect(liveRule.transOpen).toBe("false");
     expect(view.container.querySelector('[role="alert"]')).toBeNull();
     view.cleanup();
@@ -843,22 +866,24 @@ describe("PopupCont capability parity", () => {
   });
 
   test("dispatches one content action from a scene toggle", async () => {
-    const processActions = jest.fn();
-    const setSetting = jest.fn();
-    const view = renderPopupCont({ processActions, setSetting });
+    const processActions = jest.fn(({ args }) => ({
+      setting: { tranboxSetting: { transOpen: args.enabled } },
+    }));
+    const view = renderPopupCont({ processActions }, { statefulSetting: true });
     await flushEffects();
 
     const selectionScene = view.container.querySelector(
       '.kt-popup-scene[aria-pressed="true"]'
     );
-    act(() => selectionScene.click());
+    await act(async () => selectionScene.click());
 
     expect(processActions).toHaveBeenCalledTimes(1);
     expect(processActions).toHaveBeenCalledWith({
       action: MSG_TRANSBOX_TOGGLE,
       args: { enabled: false },
     });
-    expect(setSetting).toHaveBeenCalledTimes(1);
+    expect(selectionScene.getAttribute("aria-pressed")).toBe("false");
+    expect(view.container.querySelector('[role="alert"]')).toBeNull();
     view.cleanup();
   });
 
@@ -1123,35 +1148,7 @@ describe("PopupCont capability parity", () => {
     view.cleanup();
   });
 
-  test("offers only selection translation in a selection-only PDF receiver", async () => {
-    const view = renderPopupCont({
-      capabilities: {
-        pageTranslation: false,
-        selectionTranslation: true,
-        hoverTranslation: false,
-        inputTranslation: false,
-        ruleEditor: false,
-      },
-    });
-    await flushEffects();
-
-    const mainSwitch = view.container.querySelector(
-      'input[aria-label="popup_translate_page"]'
-    );
-    expect(mainSwitch.disabled).toBe(true);
-    expect(mainSwitch.checked).toBe(false);
-    expect(view.container.querySelector(".kt-popup-language-row")).toBeNull();
-    expect(view.container.querySelector(".kt-popup-style-chips")).toBeNull();
-    expect(view.container.querySelectorAll(".kt-popup-scene")).toHaveLength(1);
-    expect(
-      view.container.querySelector(".kt-popup-scene").textContent
-    ).toContain("selection_translate");
-    act(() => view.container.querySelector(".kt-popup-hero").click());
-    expect(mockSendTabMsg).not.toHaveBeenCalled();
-    view.cleanup();
-  });
-
-  test("does not offer an empty advanced panel to a selection-only PDF receiver", async () => {
+  test("offers only selection translation without an empty advanced panel in a PDF receiver", async () => {
     const view = renderPopupCont({
       capabilities: {
         pageTranslation: false,
@@ -1163,6 +1160,21 @@ describe("PopupCont capability parity", () => {
     });
     try {
       await flushEffects();
+      const mainSwitch = view.container.querySelector(
+        'input[aria-label="popup_translate_page"]'
+      );
+      expect(mainSwitch.disabled).toBe(true);
+      expect(mainSwitch.checked).toBe(false);
+      expect(view.container.querySelector(".kt-popup-language-row")).toBeNull();
+      expect(view.container.querySelector(".kt-popup-style-chips")).toBeNull();
+      expect(view.container.querySelectorAll(".kt-popup-scene")).toHaveLength(
+        1
+      );
+      expect(
+        view.container.querySelector(".kt-popup-scene").textContent
+      ).toContain("selection_translate");
+      act(() => view.container.querySelector(".kt-popup-hero").click());
+      expect(mockSendTabMsg).not.toHaveBeenCalled();
       const disclosure = view.container.querySelector(".kt-popup-disclosure");
 
       if (disclosure) {
