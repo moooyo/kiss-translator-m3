@@ -149,16 +149,6 @@ describe("popup translation controls", () => {
     ).toBe(true);
   });
 
-  test("wraps long scene labels", () => {
-    const sceneLabelRule = POPUP_STYLES.match(
-      /\.kt-popup-scene__label\s*\{([^}]*)\}/
-    )?.[1];
-
-    expect(sceneLabelRule).toContain("white-space: normal");
-    expect(sceneLabelRule).toContain("overflow-wrap: anywhere");
-    expect(sceneLabelRule).not.toContain("text-overflow: ellipsis");
-  });
-
   test("rotates the more-services icon when expanded", () => {
     expect(POPUP_STYLES).toMatch(
       /\.kt-popup-more-service\[aria-expanded="true"\] svg\s*\{[^}]*transform:\s*rotate\(180deg\);/
@@ -194,12 +184,12 @@ describe("popup translation controls", () => {
   });
 });
 
-// Keep the background full-width and the content centered with readable lines.
+// Keep the background and content panel full-width with fluid layout.
 describe("separate translation window layout", () => {
   const windowShellRule = POPUP_STYLES.match(
     /\.kt-popup-shell--window\s*\{([^}]*)\}/
   )?.[1];
-  const centeredRule = POPUP_STYLES.match(
+  const panelRule = POPUP_STYLES.match(
     /\.kt-popup-shell--window \.kt-popup-text-panel,[^{]*\{([^}]*)\}/
   )?.[1];
 
@@ -209,9 +199,12 @@ describe("separate translation window layout", () => {
     expect(windowShellRule).not.toMatch(/width:\s*min\(/);
   });
 
-  test("centers the content and caps how wide a line gets", () => {
-    expect(centeredRule).toContain("width: min(720px, 100%)");
-    expect(centeredRule).toContain("margin-inline: auto");
+  test("expands the content panel across the full window width", () => {
+    expect(panelRule).toContain("width: 100%");
+    expect(panelRule).toContain("min-width: 0");
+    expect(panelRule).not.toMatch(/width:\s*min\(/);
+    expect(panelRule).toContain("margin: 0");
+    expect(panelRule).not.toContain("margin-inline: auto");
   });
 
   test("does not animate geometry while fitting the standalone window", () => {

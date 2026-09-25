@@ -11,6 +11,7 @@ import {
   getApiDisplayName,
   getApiSortMode,
   sortApisAlphabetically,
+  useApiItem,
   useApiList,
 } from "./Api";
 
@@ -150,14 +151,14 @@ describe("getApiSortMode", () => {
   });
 });
 
-function renderApiList() {
+function renderApiHook(useHook, ...hookArgs) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   const hookResult = {};
 
   function TestComponent() {
-    Object.assign(hookResult, useApiList());
+    Object.assign(hookResult, useHook(...hookArgs));
     return null;
   }
 
@@ -172,6 +173,10 @@ function renderApiList() {
       container.remove();
     },
   };
+}
+
+function renderApiList() {
+  return renderApiHook(useApiList);
 }
 
 describe("useApiList", () => {
@@ -224,14 +229,20 @@ describe("useApiList", () => {
     host.unmount();
   });
 
-  test("adds an API from the default template only after user action", () => {
+  test("explicitly added APIs start enabled even when their preset is disabled", () => {
     globalThis.crypto.randomUUID
       .mockReturnValueOnce("12345678-1234-1234-1234-123456789abc")
       .mockReturnValueOnce("abcdefab-cdef-cdef-cdef-abcdefabcdef");
     const host = renderApiList();
 
-    act(() => host.hookResult.addApi(OPT_TRANS_OPENAI));
+    let addedApiSlug = "";
+    act(() => {
+      addedApiSlug = host.hookResult.addApi(OPT_TRANS_OPENAI);
+    });
 
+    expect(addedApiSlug).toBe(
+      `${OPT_TRANS_OPENAI}_abcdefab-cdef-cdef-cdef-abcdefabcdef`
+    );
     expect(mockUpdateSetting).toHaveBeenCalledTimes(1);
     const update = mockUpdateSetting.mock.calls[0][0];
     const previous = { keep: true, transApis: [] };
@@ -247,11 +258,51 @@ describe("useApiList", () => {
           apiSlug: `${OPT_TRANS_OPENAI}_abcdefab-cdef-cdef-cdef-abcdefabcdef`,
           apiName: `${OPT_TRANS_OPENAI}_12345678`,
           apiType: OPT_TRANS_OPENAI,
+          isDisabled: false,
+          sortOrder: 0,
         },
       ],
     });
+
+    // Test copyApi return value
+    globalThis.crypto.randomUUID.mockReturnValueOnce("copy-uuid-1234");
+    let copiedApiSlug = "";
+    act(() => {
+      copiedApiSlug = host.hookResult.copyApi(next.transApis[0]);
+    });
+    expect(copiedApiSlug).toBe(`${OPT_TRANS_OPENAI}_copy-uuid-1234`);
+
     host.unmount();
   });
+
+  test.each([false, true])(
+    "copies the source enabled state: %p",
+    (isDisabled) => {
+      globalThis.crypto.randomUUID.mockReturnValue("copy-uuid");
+      const sourceApi = createApi(
+        "source",
+        "Source API",
+        isDisabled ? 999 : -1,
+        {
+          isDisabled,
+        }
+      );
+      const host = renderApiList();
+
+      act(() => host.hookResult.copyApi(sourceApi));
+
+      const update = mockUpdateSetting.mock.calls[0][0];
+      expect(update({ transApis: [sourceApi] }).transApis).toEqual([
+        sourceApi,
+        {
+          ...sourceApi,
+          apiSlug: "OpenAI_copy-uuid",
+          apiName: "Source API - copy",
+        },
+      ]);
+      host.unmount();
+    }
+  );
 
   test("deletes a default API without creating deletion markers", () => {
     const microsoft = DEFAULT_API_LIST.find(
@@ -273,4 +324,52 @@ describe("useApiList", () => {
     expect(next).not.toHaveProperty("deletedTransApiSlugs");
     host.unmount();
   });
+});
+
+describe("useApiItem reset", () => {
+  beforeEach(() => {
+    mockUpdateSetting.mockReset();
+  });
+
+  test.each([
+    [false, -1],
+    [true, 999],
+    [undefined, 0],
+  ])(
+    "keeps enabled state %p and order %p when restoring provider options",
+    (isDisabled, sortOrder) => {
+      const template = DEFAULT_API_LIST.find(
+        (api) => api.apiType === OPT_TRANS_OPENAI
+      );
+      const api = {
+        ...template,
+        apiSlug: "custom-openai",
+        apiName: "My OpenAI",
+        key: "saved-key",
+        url: "https://example.com/custom",
+        isDisabled,
+        sortOrder,
+      };
+      mockSetting = { keep: true, transApis: [api] };
+      const host = renderApiHook(useApiItem, api.apiSlug);
+
+      act(() => host.hookResult.reset());
+
+      const update = mockUpdateSetting.mock.calls[0][0];
+      expect(update(mockSetting)).toEqual({
+        ...mockSetting,
+        transApis: [
+          {
+            ...template,
+            apiSlug: api.apiSlug,
+            apiName: api.apiName,
+            key: api.key,
+            isDisabled: Boolean(isDisabled),
+            sortOrder,
+          },
+        ],
+      });
+      host.unmount();
+    }
+  );
 });
