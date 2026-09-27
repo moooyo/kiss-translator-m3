@@ -30,8 +30,10 @@ export class BilingualSubtitleManager {
   #seekSyncRafId = null; // 控制进度 seek 完毕后强制同步的 requestAnimationFrame ID
   #translationSessionId = 0; // 当前翻译会话版本 ID，用于防竞态过滤过期异步请求
   #abortController = null; // 用于在实例销毁时中止所有尚未返回的网络请求
-  #wasPlayingBeforeHover = false; // 记录鼠标 hover 单词前视频是否原本处于播放状态，用于离开时恢复播放
-  #hoverTarget = null;
+  #captionHovered = false;
+  #tooltipVisible = false;
+  #pausedForLookup = false;
+  #destroyed = false;
   #playerControlBarObserver = null; // 监听播放器底部控制条显隐突变的 MutationObserver
   #playerResizeObserver = null; // 记住位置时监听播放器尺寸变化
   #syncPaperBottomAfterDrag = null; // 拖拽结束后按当前控制条状态修正字幕位置
@@ -66,6 +68,11 @@ export class BilingualSubtitleManager {
       this.#wordTooltipController = new WordTooltipController({
         getVideoContainer: () => this.#videoEl.parentElement?.parentElement,
         getTimestamp: () => this.#getCurrentSubtitleStartTime(),
+        onVisibilityChange: (visible) => {
+          if (this.#destroyed) return;
+          this.#tooltipVisible = visible;
+          this.#resumeAfterLookup();
+        },
       });
     }
   }
@@ -82,6 +89,7 @@ export class BilingualSubtitleManager {
    * 启动字幕显示及监听流程
    */
   start() {
+    if (this.#destroyed) return;
     if (this.#formattedSubtitles.length === 0) {
       logger.warn("Bilingual Subtitles: No subtitles to display.");
       return;
@@ -97,6 +105,8 @@ export class BilingualSubtitleManager {
    * 销毁当前实例，全面清理 DOM 元素、未决请求、事件监听以及轮询定时器，防止内存泄漏
    */
   destroy() {
+    if (this.#destroyed) return;
+    this.#destroyed = true;
     logger.info("Bilingual Subtitle Manager: Destroying...");
     this.#translationSessionId += 1; // 递增会话 ID，使当前在途的异步请求回调全部失效
     this.#abortController?.abort(); // 中止未返回的底层请求
@@ -120,6 +130,30 @@ export class BilingualSubtitleManager {
     this.#formattedSubtitles = [];
     this.#wordTooltipController?.destroy();
     this.#wordTooltipController = null;
+    this.#captionHovered = false;
+    this.#tooltipVisible = false;
+    this.#resumeAfterLookup();
+  }
+
+  // A user-initiated play transfers playback ownership back to the player.
+  #handleVideoPlay = () => {
+    this.#pausedForLookup = false;
+  };
+
+  #resumeAfterLookup() {
+    if (
+      this.#captionHovered ||
+      this.#tooltipVisible ||
+      !this.#pausedForLookup
+    ) {
+      return;
+    }
+    this.#pausedForLookup = false;
+    if (this.#videoEl.paused && !this.#videoEl.ended) {
+      this.#videoEl.play()?.catch((error) => {
+        logger.info("Could not resume video after subtitle lookup:", error);
+      });
+    }
   }
 
   /**
@@ -278,28 +312,22 @@ export class BilingualSubtitleManager {
       (draggedBottom) => this.#syncPaperBottomAfterDrag?.(draggedBottom)
     );
 
-    // 5. 如果开启了悬浮查词，则在鼠标 hover 字幕窗口时暂停视频，方便用户稳妥查词；移开鼠标时自动恢复播放
+    // Keep the pause through pointer travel and interaction with the tooltip.
     if (isHoverLookupEnabled) {
       this.#captionWindowEl.addEventListener("pointerenter", (e) => {
-        if (e.target === this.#captionWindowEl) {
-          this.#wasPlayingBeforeHover = this.#videoEl && !this.#videoEl.paused;
-          if (this.#videoEl && !this.#videoEl.paused) {
+        if (!this.#destroyed && e.target === this.#captionWindowEl) {
+          this.#captionHovered = true;
+          if (!this.#videoEl.paused && !this.#videoEl.ended) {
+            this.#pausedForLookup = true;
             this.#videoEl.pause();
           }
         }
       });
 
       this.#captionWindowEl.addEventListener("pointerleave", (e) => {
-        if (e.target === this.#captionWindowEl) {
-          if (
-            this.#wasPlayingBeforeHover &&
-            this.#videoEl &&
-            this.#videoEl.paused
-          ) {
-            this.#videoEl.play();
-          }
-          this.#wasPlayingBeforeHover = false;
-          this.#hoverTarget = null;
+        if (!this.#destroyed && e.target === this.#captionWindowEl) {
+          this.#captionHovered = false;
+          this.#resumeAfterLookup();
         }
       });
     }
@@ -425,6 +453,7 @@ export class BilingualSubtitleManager {
     this.#videoEl.addEventListener("timeupdate", this.onTimeUpdate);
     this.#videoEl.addEventListener("seeking", this.onSeeking);
     this.#videoEl.addEventListener("seeked", this.onSeek);
+    this.#videoEl.addEventListener("play", this.#handleVideoPlay);
   }
 
   /**
@@ -434,6 +463,7 @@ export class BilingualSubtitleManager {
     this.#videoEl.removeEventListener("timeupdate", this.onTimeUpdate);
     this.#videoEl.removeEventListener("seeking", this.onSeeking);
     this.#videoEl.removeEventListener("seeked", this.onSeek);
+    this.#videoEl.removeEventListener("play", this.#handleVideoPlay);
   }
 
   /**

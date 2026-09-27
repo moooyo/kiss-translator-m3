@@ -1,5 +1,6 @@
 import { BilingualSubtitleManager } from "./BilingualSubtitleManager";
-import { apiTranslate } from "../apis/index.js";
+import { apiMicrosoftDict, apiTranslate } from "../apis/index.js";
+import { getWordsWithDefault, saveEdit } from "../libs/storage.js";
 
 jest.mock("../apis/index.js", () => ({
   apiTranslate: jest.fn(),
@@ -116,6 +117,189 @@ function setControlBarVisible(videoEl, isVisible) {
 async function waitForMutationObserver() {
   await Promise.resolve();
 }
+
+describe("BilingualSubtitleManager lookup playback", () => {
+  let manager;
+  let videoEl;
+  let caption;
+  let word;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    apiMicrosoftDict.mockReset();
+    apiMicrosoftDict.mockResolvedValue({
+      trs: [{ pos: "interj.", def: "A greeting" }],
+    });
+    getWordsWithDefault.mockResolvedValue({});
+    saveEdit.mockImplementation(async (_key, update) => ({
+      value: update({}),
+      changed: true,
+    }));
+  });
+
+  afterEach(() => {
+    manager?.destroy();
+    manager = null;
+    jest.clearAllTimers();
+    jest.useRealTimers();
+  });
+
+  function setup({ initiallyPaused = false } = {}) {
+    videoEl = createVideoElement();
+    let paused = initiallyPaused;
+    Object.defineProperty(videoEl, "paused", { get: () => paused });
+    videoEl.pause = jest.fn(() => {
+      paused = true;
+      videoEl.dispatchEvent(new Event("pause"));
+    });
+    videoEl.play = jest.fn(() => {
+      paused = false;
+      videoEl.dispatchEvent(new Event("play"));
+      return Promise.resolve();
+    });
+    manager = new BilingualSubtitleManager({
+      videoEl,
+      formattedSubtitles: [{ ...subtitle, translation: "A greeting" }],
+      setting: { ...setting, hoverLookupMode: "on" },
+    });
+    manager.start();
+    caption = document.querySelector(".kiss-caption-window");
+    word = caption.querySelector(".kiss-subtitle-word");
+  }
+
+  function pointer(target, type, relatedTarget = null) {
+    target.dispatchEvent(new MouseEvent(type, { relatedTarget }));
+  }
+
+  function enterCaption() {
+    pointer(caption, "pointerenter");
+    pointer(word, "pointerenter");
+  }
+
+  function leaveCaption(relatedTarget = null) {
+    pointer(word, "pointerleave", relatedTarget);
+    pointer(caption, "pointerleave", relatedTarget);
+  }
+
+  async function openTooltip() {
+    enterCaption();
+    jest.advanceTimersByTime(300);
+    await Promise.resolve();
+    await Promise.resolve();
+    const tooltip = document.querySelector(".kiss-word-tooltip");
+    expect(tooltip).not.toBeNull();
+    return tooltip;
+  }
+
+  test("keeps playback paused through travel to the tooltip and resumes after leaving it", async () => {
+    setup();
+    const tooltip = await openTooltip();
+    expect(videoEl.pause).toHaveBeenCalledTimes(1);
+
+    leaveCaption();
+    jest.advanceTimersByTime(400);
+    expect(videoEl.paused).toBe(true);
+    expect(videoEl.play).not.toHaveBeenCalled();
+
+    pointer(tooltip, "pointerenter");
+    jest.advanceTimersByTime(1000);
+    expect(tooltip.isConnected).toBe(true);
+    expect(videoEl.play).not.toHaveBeenCalled();
+
+    pointer(tooltip, "pointerleave");
+    jest.advanceTimersByTime(499);
+    expect(videoEl.play).not.toHaveBeenCalled();
+    jest.advanceTimersByTime(1);
+    expect(tooltip.isConnected).toBe(false);
+    expect(videoEl.play).toHaveBeenCalledTimes(1);
+    expect(videoEl.paused).toBe(false);
+  });
+
+  test("preserves pause ownership when returning from the tooltip to the caption", async () => {
+    setup();
+    const tooltip = await openTooltip();
+    leaveCaption(tooltip);
+    pointer(tooltip, "pointerenter", word);
+    pointer(tooltip, "pointerleave", word);
+    enterCaption();
+    jest.advanceTimersByTime(300);
+    expect(apiMicrosoftDict).toHaveBeenCalledTimes(2);
+    await apiMicrosoftDict.mock.results[1].value;
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(videoEl.pause).toHaveBeenCalledTimes(1);
+    expect(videoEl.play).not.toHaveBeenCalled();
+
+    document.querySelector(".kiss-word-tooltip-close").click();
+    expect(document.querySelector(".kiss-word-tooltip")).toBeNull();
+    expect(videoEl.play).not.toHaveBeenCalled();
+
+    leaveCaption();
+    expect(videoEl.play).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(500);
+    expect(videoEl.play).toHaveBeenCalledTimes(1);
+  });
+
+  test("leaves an initially paused video paused after lookup and teardown", async () => {
+    setup({ initiallyPaused: true });
+    await openTooltip();
+    leaveCaption();
+    jest.advanceTimersByTime(500);
+    manager.destroy();
+
+    expect(videoEl.pause).not.toHaveBeenCalled();
+    expect(videoEl.play).not.toHaveBeenCalled();
+    expect(videoEl.paused).toBe(true);
+  });
+
+  test("does not resume a video the user played and paused during lookup", async () => {
+    setup();
+    await openTooltip();
+    await videoEl.play();
+    videoEl.pause();
+    videoEl.play.mockClear();
+
+    leaveCaption();
+    jest.advanceTimersByTime(500);
+    manager.destroy();
+
+    expect(videoEl.play).not.toHaveBeenCalled();
+    expect(videoEl.paused).toBe(true);
+  });
+
+  test("resumes once on teardown and ignores late tooltip and caption callbacks", async () => {
+    setup();
+    const lookup = createDeferred();
+    apiMicrosoftDict.mockReturnValue(lookup.promise);
+    await openTooltip();
+
+    manager.destroy();
+    expect(videoEl.play).toHaveBeenCalledTimes(1);
+    pointer(caption, "pointerenter");
+    pointer(caption, "pointerleave");
+    lookup.resolve({ trs: [{ def: "A greeting" }] });
+    await lookup.promise;
+    await Promise.resolve();
+    jest.advanceTimersByTime(1000);
+    manager.destroy();
+
+    expect(videoEl.pause).toHaveBeenCalledTimes(1);
+    expect(videoEl.play).toHaveBeenCalledTimes(1);
+    expect(document.querySelector(".kiss-word-tooltip")).toBeNull();
+  });
+
+  test("resumes promptly when the pointer leaves before a lookup opens", () => {
+    setup();
+    enterCaption();
+    jest.advanceTimersByTime(100);
+    leaveCaption();
+
+    expect(videoEl.pause).toHaveBeenCalledTimes(1);
+    expect(videoEl.play).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(1000);
+    expect(apiMicrosoftDict).not.toHaveBeenCalled();
+  });
+});
 
 describe("BilingualSubtitleManager", () => {
   beforeEach(() => {
