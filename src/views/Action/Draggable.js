@@ -14,6 +14,13 @@ import Paper from "@mui/material/Paper";
 
 const FAB_EDGES = ["left", "right", "top", "bottom"];
 
+// Ignore only floating-point roundoff from proportional coordinate conversion.
+const samePixelCoordinate = (previous, next) =>
+  Number.isFinite(previous) &&
+  Number.isFinite(next) &&
+  Math.abs(previous - next) <=
+    Number.EPSILON * 2 * Math.max(1, Math.abs(previous), Math.abs(next));
+
 // Find the viewport edge nearest to the current position.
 export const getNearestEdge = ({
   x: left,
@@ -143,8 +150,30 @@ export default function Draggable({
     x: left / windowWidth,
     y: top / windowHeight,
   });
-  // Debounce storage updates for the latest drag position.
-  const setFabPosition = useMemo(() => debounce(putFab, 500), []);
+  const lastRequestedFabPosition = useRef({
+    x: left,
+    y: top,
+    edge: savedEdge,
+  });
+  // Storage uses pixels, while React state uses viewport proportions. Compare
+  // the final debounced request so a resize or an already-snapped drag saves
+  // its new coordinates, but returning to the saved position does not write.
+  const setFabPosition = useMemo(
+    () =>
+      debounce((nextPosition) => {
+        const previous = lastRequestedFabPosition.current;
+        if (
+          samePixelCoordinate(previous.x, nextPosition.x) &&
+          samePixelCoordinate(previous.y, nextPosition.y) &&
+          previous.edge === nextPosition.edge
+        ) {
+          return;
+        }
+        lastRequestedFabPosition.current = nextPosition;
+        putFab(nextPosition);
+      }, 500),
+    []
+  );
 
   // Apply the current position directly to the container.
   const applyTransform = useCallback((x, y) => {
@@ -245,19 +274,15 @@ export default function Draggable({
       x: edgePosition.x / windowWidth,
       y: edgePosition.y / windowHeight,
     };
-    // Persist only when normalization actually changed the position or the
-    // edge. Re-writing identical values on every mount sends a redundant
-    // storage update for each new tab; skipping them also avoids a no-op
-    // re-render. Legacy positions (no valid stored edge) and clamped or
-    // non-finite coordinates always differ here and keep being persisted.
+    // Deduplicate React updates separately from pixel-based persistence.
     const unchanged =
       activeEdge === edge &&
       percentageEdge.x === position.x &&
       percentageEdge.y === position.y;
     if (!unchanged) {
       setPosition(percentageEdge);
-      setFabPosition({ ...edgePosition, edge: activeEdge });
     }
+    setFabPosition({ ...edgePosition, edge: activeEdge });
   }, [
     edge,
     origin,

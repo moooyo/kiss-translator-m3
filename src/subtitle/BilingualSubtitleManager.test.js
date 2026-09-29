@@ -123,9 +123,11 @@ describe("BilingualSubtitleManager lookup playback", () => {
   let videoEl;
   let caption;
   let word;
+  let pendingMediaEvents;
 
   beforeEach(() => {
     jest.useFakeTimers();
+    pendingMediaEvents = [];
     apiMicrosoftDict.mockReset();
     apiMicrosoftDict.mockResolvedValue({
       trs: [{ pos: "interj.", def: "A greeting" }],
@@ -144,27 +146,43 @@ describe("BilingualSubtitleManager lookup playback", () => {
     jest.useRealTimers();
   });
 
-  function setup({ initiallyPaused = false } = {}) {
+  function setup({
+    initiallyPaused = false,
+    translation = "A greeting",
+    queueMediaEvents = false,
+  } = {}) {
     videoEl = createVideoElement();
     let paused = initiallyPaused;
+    const dispatchMediaEvent = (type) => {
+      const event = new Event(type);
+      Object.defineProperty(event, "timeStamp", { value: performance.now() });
+      if (queueMediaEvents) pendingMediaEvents.push(event);
+      else videoEl.dispatchEvent(event);
+    };
     Object.defineProperty(videoEl, "paused", { get: () => paused });
     videoEl.pause = jest.fn(() => {
       paused = true;
-      videoEl.dispatchEvent(new Event("pause"));
+      dispatchMediaEvent("pause");
     });
     videoEl.play = jest.fn(() => {
       paused = false;
-      videoEl.dispatchEvent(new Event("play"));
+      dispatchMediaEvent("play");
       return Promise.resolve();
     });
     manager = new BilingualSubtitleManager({
       videoEl,
-      formattedSubtitles: [{ ...subtitle, translation: "A greeting" }],
+      formattedSubtitles: [{ ...subtitle, translation }],
       setting: { ...setting, hoverLookupMode: "on" },
     });
     manager.start();
     caption = document.querySelector(".kiss-caption-window");
     word = caption.querySelector(".kiss-subtitle-word");
+  }
+
+  function flushMediaEvents() {
+    pendingMediaEvents
+      .splice(0)
+      .forEach((event) => videoEl.dispatchEvent(event));
   }
 
   function pointer(target, type, relatedTarget = null) {
@@ -240,6 +258,30 @@ describe("BilingualSubtitleManager lookup playback", () => {
     expect(videoEl.play).toHaveBeenCalledTimes(1);
   });
 
+  test("resumes after a streamed translation replaces a hovered word without pointerleave", async () => {
+    const translation = createDeferred();
+    let streamChunk;
+    apiTranslate.mockImplementation(({ onStreamChunk }) => {
+      streamChunk = onStreamChunk;
+      return translation.promise;
+    });
+    setup({ translation: "" });
+    const tooltip = await openTooltip();
+
+    streamChunk({ text: "Partial translation", isComplete: false });
+    expect(word.isConnected).toBe(false);
+    pointer(caption, "pointerleave");
+    jest.advanceTimersByTime(499);
+    expect(tooltip.isConnected).toBe(true);
+    expect(videoEl.play).not.toHaveBeenCalled();
+    jest.advanceTimersByTime(1);
+    expect(tooltip.isConnected).toBe(false);
+    expect(videoEl.play).toHaveBeenCalledTimes(1);
+
+    translation.resolve({ trText: "Complete translation" });
+    await translation.promise;
+  });
+
   test("leaves an initially paused video paused after lookup and teardown", async () => {
     setup({ initiallyPaused: true });
     await openTooltip();
@@ -265,6 +307,65 @@ describe("BilingualSubtitleManager lookup playback", () => {
 
     expect(videoEl.play).not.toHaveBeenCalled();
     expect(videoEl.paused).toBe(true);
+  });
+
+  test("retains a hover pause when an earlier native play event arrives late", () => {
+    setup({ initiallyPaused: true, queueMediaEvents: true });
+    videoEl.play();
+    videoEl.play.mockClear();
+    jest.advanceTimersByTime(1);
+    enterCaption();
+    flushMediaEvents();
+
+    expect(videoEl.paused).toBe(true);
+    leaveCaption();
+    expect(videoEl.play).toHaveBeenCalledTimes(1);
+    expect(videoEl.paused).toBe(false);
+  });
+
+  test("retains a hover pause after several earlier queued playback changes", () => {
+    setup({ queueMediaEvents: true });
+    videoEl.pause();
+    videoEl.play();
+    videoEl.play.mockClear();
+    jest.advanceTimersByTime(1);
+    enterCaption();
+    flushMediaEvents();
+    leaveCaption();
+
+    expect(videoEl.play).toHaveBeenCalledTimes(1);
+    expect(videoEl.paused).toBe(false);
+  });
+
+  test("respects a later user play and pause even when both events arrive while paused", () => {
+    setup({ queueMediaEvents: true });
+    enterCaption();
+    jest.advanceTimersByTime(1);
+    videoEl.play();
+    videoEl.pause();
+    videoEl.play.mockClear();
+    flushMediaEvents();
+    leaveCaption();
+    jest.advanceTimersByTime(500);
+    manager.destroy();
+
+    expect(videoEl.play).not.toHaveBeenCalled();
+    expect(videoEl.paused).toBe(true);
+  });
+
+  test("preserves ownership across consecutive lookups while earlier events are queued", () => {
+    setup({ queueMediaEvents: true });
+    for (let index = 0; index < 3; index += 1) {
+      jest.advanceTimersByTime(1);
+      enterCaption();
+      flushMediaEvents();
+      expect(videoEl.paused).toBe(true);
+      leaveCaption();
+      expect(videoEl.paused).toBe(false);
+    }
+
+    expect(videoEl.pause).toHaveBeenCalledTimes(3);
+    expect(videoEl.play).toHaveBeenCalledTimes(3);
   });
 
   test("resumes once on teardown and ignores late tooltip and caption callbacks", async () => {

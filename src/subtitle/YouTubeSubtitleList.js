@@ -72,6 +72,9 @@ export class YouTubeSubtitleList {
     this._playerResizeObserver = null; // 监听播放器尺寸变化，使右侧字幕列表高度与播放器高度保持一致
     this._playerSizeListenerAttached = false;
     this._wordTooltipController = null; // 右侧列表英文单词 hover 查词控制器
+    this._containerHovered = false;
+    this._tooltipVisible = false;
+    this._destroyed = false;
 
     // --- 交互事件句柄绑定 ---
     this.handleWordAdded = this.handleWordAdded.bind(this);
@@ -96,6 +99,11 @@ export class YouTubeSubtitleList {
         getTimestamp: () => this.videoEl.currentTime * 1000,
         autoFavWord: this.autoFavWord,
         i18n: this.i18n,
+        onVisibilityChange: (visible) => {
+          this._tooltipVisible = visible;
+          if (visible) this.turnOffAutoSub();
+          else this.turnOnAutoSub();
+        },
       });
     }
   }
@@ -115,7 +123,7 @@ export class YouTubeSubtitleList {
    * 实际 DOM 重建会被 _scheduleVirtualRender 合并，避免滚动过程中每个事件都同步改 DOM。
    */
   handleSubtitleScroll() {
-    this._wordTooltipController?.clearHoverState();
+    this._wordTooltipController?.releaseActiveWord();
     this._scheduleVirtualRender();
   }
 
@@ -123,6 +131,7 @@ export class YouTubeSubtitleList {
    * 鼠标进入侧栏时暂停自动跟随，方便用户手动浏览或选择字幕文本。
    */
   handleContainerMouseEnter() {
+    this._containerHovered = true;
     this.turnOffAutoSub();
   }
 
@@ -130,6 +139,7 @@ export class YouTubeSubtitleList {
    * 鼠标离开侧栏后恢复自动跟随视频进度。
    */
   handleContainerMouseLeave() {
+    this._containerHovered = false;
     this.turnOnAutoSub();
   }
 
@@ -229,6 +239,7 @@ export class YouTubeSubtitleList {
    * 销毁器 - 全面解绑事件监听、注销定时器、强行中断进行中的异步分块渲染并清理 DOM 节点引用以防止内存泄漏
    */
   destroy() {
+    this._destroyed = true;
     this.turnOffAutoSub();
     this._cancelChunkRender();
     this._cancelVirtualRender();
@@ -483,6 +494,7 @@ export class YouTubeSubtitleList {
     }
 
     this.subtitleListUl.replaceChildren(fragment);
+    this._wordTooltipController?.reconcileActiveWord();
     this._measureVisibleSubtitleItems();
   }
 
@@ -1572,7 +1584,14 @@ export class YouTubeSubtitleList {
    */
   turnOnAutoSub() {
     this.turnOffAutoSub();
-    if (this.videoEl.paused) return; // 暂停状态无需轮询
+    if (
+      this._destroyed ||
+      !this.videoEl ||
+      this.videoEl.paused ||
+      this._containerHovered ||
+      this._tooltipVisible
+    )
+      return;
 
     this.loopAutoScroll = setInterval(() => {
       if (

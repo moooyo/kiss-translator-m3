@@ -2,6 +2,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import Draggable, { getEdgePosition } from "./Draggable";
 import { putFab } from "../../libs/storage";
+import { isMobile } from "../../libs/mobile";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -18,6 +19,7 @@ describe("Draggable FAB edge locking", () => {
 
   beforeEach(() => {
     jest.useFakeTimers();
+    require("../../libs/mobile").isMobile = false;
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -238,9 +240,69 @@ describe("Draggable FAB edge locking", () => {
     act(() => jest.runOnlyPendingTimers());
 
     expect(draggable.style.transform).toBe("translate(300px, -20px)");
-    // Normalization never changed the position, so no storage rewrite happens.
+    // Both resizes finish before the debounce, returning to the saved pixels.
     expect(putFab).not.toHaveBeenCalled();
   });
+
+  test("persists resized pixels even when viewport proportions stay unchanged", () => {
+    const fab = renderFab({ edge: "top", left: 300, top: -20 });
+    act(() => jest.advanceTimersByTime(500));
+    expect(putFab).not.toHaveBeenCalled();
+
+    setViewport(1001, 400);
+    rerenderFab(fab, { windowSize: { w: 1001, h: 400 } });
+    expect(draggable.style.transform).toBe("translate(500.5px, -20px)");
+    act(() => jest.advanceTimersByTime(500));
+
+    expect(putFab).toHaveBeenCalledTimes(1);
+    expect(putFab).toHaveBeenLastCalledWith({ x: 500.5, y: -20, edge: "top" });
+
+    act(() => root.unmount());
+    root = createRoot(container);
+    renderFab({
+      ...fab,
+      left: putFab.mock.calls[0][0].x,
+      windowSize: { w: 1001, h: 400 },
+    });
+    expect(draggable.style.transform).toBe("translate(500.5px, -20px)");
+    act(() => jest.advanceTimersByTime(500));
+    expect(putFab).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([false, true])(
+    "persists an already-snapped drag with touch input %s",
+    (touchInput) => {
+      require("../../libs/mobile").isMobile = touchInput;
+      renderFab({ edge: "left", left: -20, top: 100 });
+      const handler = draggable.firstElementChild.firstElementChild;
+      act(() => jest.advanceTimersByTime(500));
+      expect(putFab).not.toHaveBeenCalled();
+
+      const dispatch = (phase, y) => {
+        const type = isMobile
+          ? { down: "touchstart", move: "touchmove", up: "touchend" }[phase]
+          : `pointer${phase}`;
+        const event = new MouseEvent(type, {
+          bubbles: true,
+          clientX: 0,
+          clientY: y,
+        });
+        if (isMobile) {
+          Object.defineProperty(event, "targetTouches", {
+            value: [{ clientX: 0, clientY: y }],
+          });
+        }
+        act(() => handler.dispatchEvent(event));
+      };
+      dispatch("down", 110);
+      dispatch("move", 210);
+      dispatch("up", 210);
+      act(() => jest.advanceTimersByTime(500));
+
+      expect(draggable.style.transform).toBe("translate(-20px, 200px)");
+      expect(putFab).toHaveBeenLastCalledWith({ x: -20, y: 200, edge: "left" });
+    }
+  );
 
   test("hovering expands the FAB without changing its saved edge", () => {
     renderFab();
@@ -263,7 +325,7 @@ describe("Draggable FAB edge locking", () => {
     act(() => jest.runOnlyPendingTimers());
     expect(draggable.style.transform).toBe("translate(580px, 200px)");
     expect(draggable.style.opacity).toBe("1");
-    expect(putFab).toHaveBeenLastCalledWith({ x: 580, y: 200, edge: "right" });
+    expect(putFab).not.toHaveBeenCalled();
   });
 
   test("keeps the transform transition disabled on mount until the first position is applied", () => {
@@ -356,6 +418,20 @@ describe("Draggable FAB edge locking", () => {
 
     expect(putFab).not.toHaveBeenCalled();
     expect(draggable.style.transform).toBe("translate(580px, 200px)");
+  });
+
+  test("does not persist proportional roundoff during an otherwise unchanged mount", () => {
+    setViewport(100, 400);
+    renderFab({
+      edge: "top",
+      left: 29,
+      top: -20,
+      windowSize: { w: 100, h: 400 },
+    });
+    act(() => jest.advanceTimersByTime(500));
+
+    expect(draggable.getBoundingClientRect().left).toBeCloseTo(29, 12);
+    expect(putFab).not.toHaveBeenCalled();
   });
 
   test("infers and persists an edge for legacy FAB positions", () => {

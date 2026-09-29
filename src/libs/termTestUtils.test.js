@@ -1,4 +1,5 @@
 import { buildTermsMatcher, parseTerms } from "./terms";
+import * as termsModule from "./terms";
 import {
   hashKey,
   detectTermConflicts,
@@ -424,6 +425,78 @@ describe("termTestUtils joinIntoParagraph", () => {
 
 // ─── assertTermReplacements ──────────────────────────────────────────────────
 describe("termTestUtils assertTermReplacements", () => {
+  test.each([
+    "C\\+,C+;C\\+Builder,C+Builder",
+    "C\\+,C+;C\\+Builder",
+    "C\\+;C\\+Builder,C+Builder",
+  ])(
+    "accepts identity translations in both conflict directions: %s",
+    (source) => {
+      const parsed = parseTerms(source);
+      const cases = generateTermTestText(parsed).filter(
+        (testCase) => testCase.type === "conflict"
+      );
+
+      expect(cases).toHaveLength(2);
+      expect(cases.map((testCase) => testCase.direction).sort()).toEqual([
+        "long-first",
+        "short-first",
+      ]);
+      for (const testCase of cases) {
+        const result = assertTermReplacements(parsed, testCase);
+        expect(result.ok).toBe(true);
+        expect(result.issues).toEqual([]);
+        expect(result.fixed.output).toBe(testCase.text);
+      }
+    }
+  );
+
+  test("accepts an identity translation for a single escaped term", () => {
+    const parsed = parseTerms("C\\+,C+");
+    const [testCase] = generateTermTestText(parsed);
+    const result = assertTermReplacements(parsed, testCase);
+
+    expect(result.ok).toBe(true);
+    expect(result.fixed.output).toBe(testCase.text);
+  });
+
+  test.each(["short", "long"])(
+    "rejects an incorrect non-original replacement for the %s conflict term",
+    (role) => {
+      const parsed = parseTerms("C\\+,C language;C\\+Builder,Builder IDE");
+      const cases = generateTermTestText(parsed).filter(
+        (testCase) => testCase.type === "conflict"
+      );
+      expect(cases).toHaveLength(2);
+
+      for (const testCase of cases) {
+        const expectedTerm = testCase[role];
+        const actualTerms = parsed.terms.map((term) =>
+          term.key === expectedTerm.key
+            ? { ...term, value: "Unexpected replacement" }
+            : term
+        );
+        const result = assertTermReplacements(actualTerms, testCase);
+        const incorrectSpan = result.fixed.spans.find(
+          (span) => span.termKey === expectedTerm.key
+        );
+
+        expect(incorrectSpan.replacement).not.toBe(
+          testCase.text.slice(incorrectSpan.start, incorrectSpan.end)
+        );
+        expect(result.ok).toBe(false);
+        expect(result.issues).toEqual([
+          expect.objectContaining({
+            messageKey: `conflict-${role}-value-not-applied`,
+            detail: expect.objectContaining({
+              expectedReplacement: expectedTerm.value,
+            }),
+          }),
+        ]);
+      }
+    }
+  );
+
   test("keeps the actual matched text for an empty escaped-literal mapping", () => {
     const parsed = parseTerms("C\\+\\+");
     const [testCase] = generateTermTestText(parsed);
@@ -783,7 +856,9 @@ describe("termTestUtils assertTermReplacements", () => {
       (c) => c.type === "conflict"
     );
     expect(cases.length).toBeGreaterThan(0);
-    const results = cases.map((c) => assertTermReplacements(parsed, c, { engine: "naive" }));
+    const results = cases.map((c) =>
+      assertTermReplacements(parsed, c, { engine: "naive" })
+    );
     const hasCut = results.some((r) =>
       r.issues.some(
         (i) => i.type === "naive-prefix-cut" || i.type === "naive-cut-residue"
@@ -878,7 +953,9 @@ describe("termTestUtils generateTermTestText treatKeysAsLiteral", () => {
     expect(cases.some((c) => c.term?.key === "API")).toBe(true);
     for (const blank of ["", "  ", "\t"]) {
       expect(cases.some((c) => c.term?.key === blank)).toBe(false);
-      expect(cases.some((c) => c.type === "unsupported" && c.term?.key === blank)).toBe(false);
+      expect(
+        cases.some((c) => c.type === "unsupported" && c.term?.key === blank)
+      ).toBe(false);
     }
     // API 的 single 用例仍可断言通过（pattern 条目）
     const apiCase = cases.find((c) => c.type === "single");
@@ -912,11 +989,15 @@ describe("termTestUtils detectTermConflicts treatKeysAsLiteral", () => {
       { key: "baa", value: "Y" },
     ];
     // 先字面后默认
-    expect(detectTermConflicts(terms, { treatKeysAsLiteral: true })).toHaveLength(0);
+    expect(
+      detectTermConflicts(terms, { treatKeysAsLiteral: true })
+    ).toHaveLength(0);
     expect(detectTermConflicts(terms)).toHaveLength(1);
     // 双向预热后互换查询，结果仍各自正确（缓存未串）
     expect(detectTermConflicts(terms)).toHaveLength(1);
-    expect(detectTermConflicts(terms, { treatKeysAsLiteral: true })).toHaveLength(0);
+    expect(
+      detectTermConflicts(terms, { treatKeysAsLiteral: true })
+    ).toHaveLength(0);
   });
 });
 
@@ -1160,6 +1241,79 @@ describe("termTestUtils selectDisplayedResults", () => {
 
 // ─── 冲突分析记忆化与 conflicts 复用（统一计划 20260829 Task 4）──────────────
 describe("termTestUtils 冲突分析记忆化（统一计划 20260829 Task 4）", () => {
+  test("classifies and caches each disjoint literal key only once", () => {
+    const terms = Array.from({ length: 96 }, (_, index) => ({
+      key: `term${String(index).padStart(3, "0")}end${"x".repeat(index % 12)}`,
+      value: "",
+    }));
+    const classification = jest.spyOn(termsModule, "isStrictLiteralPattern");
+    const cacheWrites = jest.spyOn(Map.prototype, "set");
+    let conflicts;
+    let repeated;
+    let classifiedKeys;
+    let storedKeys;
+
+    try {
+      conflicts = detectTermConflicts(terms);
+      repeated = detectTermConflicts(terms);
+      classifiedKeys = classification.mock.calls.map(([key]) => key);
+      storedKeys = cacheWrites.mock.calls
+        .filter(([, value]) => typeof value === "boolean")
+        .map(([key]) => key);
+    } finally {
+      cacheWrites.mockRestore();
+      classification.mockRestore();
+    }
+
+    const keys = terms.map((term) => term.key).sort();
+    expect(conflicts).toEqual([]);
+    expect(repeated).toBe(conflicts);
+    expect(classifiedKeys.length).toBe(keys.length);
+    expect(storedKeys.length).toBe(keys.length);
+    expect(classifiedKeys.sort()).toEqual(keys);
+    expect(storedKeys.sort()).toEqual(keys);
+  });
+
+  test("caches negative classifications while keeping literal mode isolated", () => {
+    const terms = [
+      { key: "a+", value: "" },
+      { key: "baa", value: "" },
+      { key: "caaa", value: "" },
+      { key: "daaaa", value: "" },
+    ];
+    const classification = jest.spyOn(termsModule, "isStrictLiteralPattern");
+    const restoreRegExp = installCountingRegExp();
+    let regexConflicts;
+    let literalConflicts;
+    let regexCalls;
+    let literalCalls;
+    let compilations;
+
+    try {
+      regexConflicts = detectTermConflicts(terms);
+      regexCalls = classification.mock.calls.map(([key]) => key);
+      classification.mockClear();
+      literalConflicts = detectTermConflicts(terms, {
+        treatKeysAsLiteral: true,
+      });
+      literalCalls = classification.mock.calls.length;
+    } finally {
+      compilations = restoreRegExp();
+      classification.mockRestore();
+    }
+
+    expect(regexConflicts).toHaveLength(3);
+    expect(literalConflicts).toEqual([]);
+    expect(regexCalls.filter((key) => key === "a+")).toHaveLength(1);
+    expect(new Set(regexCalls).size).toBe(regexCalls.length);
+    expect(literalCalls).toBe(0);
+    expect(compilations).toBe(1);
+    expect(detectTermConflicts(terms)).toBe(regexConflicts);
+    expect(detectTermConflicts(terms, { treatKeysAsLiteral: true })).toBe(
+      literalConflicts
+    );
+  });
+
   function installCountingRegExp() {
     const RealRegExp = RegExp;
     let count = 0;

@@ -890,7 +890,7 @@ function formatAssertionIssue(issue, i18n) {
       return formatI18n(
         i18n,
         "terminology_playground_issue_conflict_long_no_value_replaced",
-        "长词 {long} 无译文但被替换为 \"{replacement}\"。",
+        '长词 {long} 无译文但被替换为 "{replacement}"。',
         params
       );
     case "conflict-short-value-not-applied":
@@ -976,6 +976,7 @@ function renderHighlighted(text, spans) {
 export default function TerminologyPlayground({
   termsDraft,
   setTermsDraft,
+  initializeTermsDraft = setTermsDraft,
   termDraftTouched,
   setTermDraftTouched,
   termSeed,
@@ -995,9 +996,14 @@ export default function TerminologyPlayground({
   const { list: userRules } = useRules();
   // 术语/seed 草稿由父级 Playground 持有并随页签切换保留（不持久化、不写入正式规则）。
   const [computed, setComputed] = useState(null);
+  const hasComputed = useRef(false);
   const [loadError, setLoadError] = useState("");
   // 跟踪用户是否在异步初始加载完成前编辑了输入框，避免覆盖用户已编辑内容。
   const hasUserEdited = useRef(false);
+  const latestDraftTouched = useRef(termDraftTouched);
+  useEffect(() => {
+    latestDraftTouched.current = termDraftTouched;
+  }, [termDraftTouched]);
   // 输入框采用原生 resize:vertical 缩放，不引入自定义手柄。
 
   // 本地重算：解析 → 自然文本生成 → 结构化断言，并把完整 detail 打到控制台。
@@ -1005,6 +1011,7 @@ export default function TerminologyPlayground({
   const runCompute = useMemo(
     () =>
       (value, seed = "") => {
+        hasComputed.current = true;
         // Playground 显式请求完整诊断（含 O(n²) 跨术语 conflicting-pattern 分析）
         const parsed = parseTerms(value, { fullDiagnostics: true });
 
@@ -1023,14 +1030,15 @@ export default function TerminologyPlayground({
               parsed.metaWarnings
             );
           }
-          setComputed({
+          const result = {
             parsed,
             fatalDiagnostics,
             metaWarnings: parsed.metaWarnings,
             invalid: parsed.invalid,
             hasErrors: true,
-          });
-          return;
+          };
+          setComputed(result);
+          return result;
         }
 
         // 冲突分析只算一次（统一计划 20260829 Task 4）：generateTermTestText
@@ -1097,7 +1105,7 @@ export default function TerminologyPlayground({
           logger.error("[TermPlayground]", allIssues);
         }
 
-        setComputed({
+        const result = {
           parsed,
           cases,
           results,
@@ -1118,7 +1126,9 @@ export default function TerminologyPlayground({
             hiddenFailCount,
             hiddenPassCount,
           },
-        });
+        };
+        setComputed(result);
+        return result;
       },
     []
   );
@@ -1126,12 +1136,19 @@ export default function TerminologyPlayground({
   // 输入变化后 300ms 内没有再次输入才重算，避免每敲一个字符都做全量断言。
   const recompute = useMemo(() => debounce(runCompute, 300), [runCompute]);
 
-  // 卸载时取消未执行的防抖任务，避免在已卸载的组件上 setState。
+  // Every draft or seed update replaces the pending computation, including sync.
+  // The first populated draft is computed immediately; later edits are debounced.
   useEffect(() => {
+    if (!hasComputed.current && !(termsDraft || "").trim()) return;
+    if (hasComputed.current) {
+      recompute(termsDraft, termSeed);
+    } else {
+      runCompute(termsDraft, termSeed);
+    }
     return () => {
       recompute.cancel();
     };
-  }, [recompute]);
+  }, [termsDraft, termSeed, recompute, runCompute]);
 
   // 规则加载（恢复 activeRuleData / initial terms）：与用户草稿覆盖解耦。
   // touched 只阻止 setTermsDraft 覆盖草稿，不阻止 matchRule() 恢复规则元数据——
@@ -1174,11 +1191,12 @@ export default function TerminologyPlayground({
 
       // termsDraft 覆盖仅限「无草稿」（未 touched 且用户未编辑）场景：
       // 规则术语与全局术语都为空时默认填入冲突矩阵示例，保证例句自动生成。
-      if (hasUserEdited.current || termDraftTouched) return;
+      if (hasUserEdited.current || latestDraftTouched.current) return;
       const ruleTerms = rule?.terms || "";
       const initial = ruleTerms || CONFLICT_MATRIX_SAMPLE;
-      setTermsDraft(initial);
-      runCompute(initial, termSeed);
+      // The parent owns initialization so storage updates can revoke it before
+      // React commits their state, including a remote clear of an empty draft.
+      initializeTermsDraft(initial);
     })();
     return () => {
       cancelled = true;
@@ -1188,28 +1206,17 @@ export default function TerminologyPlayground({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 页签往返 + 已有草稿：首次挂载 computed 为 null 时补算例句（不覆盖草稿、
-  // 不跑空算）。与规则加载 effect 独立，避免规则加载与否影响例句生成。
-  useEffect(() => {
-    if (termDraftTouched && computed === null && (termsDraft || "").trim()) {
-      runCompute(termsDraft, termSeed);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [termDraftTouched, computed, termsDraft, termSeed]);
-
   const handleTermsChange = (event) => {
     const value = event.target.value;
     hasUserEdited.current = true;
     setTermDraftTouched(true);
     setTermsDraft(value);
-    recompute(value, termSeed);
   };
 
   const handleLoadSample = () => {
     hasUserEdited.current = true;
     setTermDraftTouched(true);
     setTermsDraft(CONFLICT_MATRIX_SAMPLE);
-    recompute(CONFLICT_MATRIX_SAMPLE, termSeed);
   };
 
   // 换一个例句：在有限模板集合内通过显式 seed 轮换（确定性、可复现），
@@ -1217,14 +1224,14 @@ export default function TerminologyPlayground({
   const handleRotateSeed = () => {
     const nextSeed = String((Number(termSeed) || 0) + 1);
     setTermSeed(nextSeed);
-    recompute(termsDraft, nextSeed);
   };
 
   // 「测试」按钮：对当前生成的例句跑一次本地术语替换，结果以顶部居中
   // Snackbar 弹出（绿色=通过、红色=失败），样式与接口设置的测试弹窗一致。
   const handleRunTest = () => {
-    if (!computed) return;
-    if (computed.hasErrors) {
+    recompute.cancel();
+    const result = runCompute(termsDraft, termSeed);
+    if (result.hasErrors) {
       alert.error(
         i18n(
           "terminology_playground_alert_invalid_terms",
@@ -1233,7 +1240,7 @@ export default function TerminologyPlayground({
       );
       return;
     }
-    const entry = computed.results?.[0];
+    const entry = result.results?.[0];
     if (!entry) {
       alert.error(
         i18n("terminology_playground_alert_no_example", "未生成可测试的例句。")
@@ -2588,8 +2595,7 @@ export default function TerminologyPlayground({
                                 0,
                                 aiGlossaryExpanded ? undefined : DISPLAY_LIMIT
                               )
-                              .map(
-                              ({ source, key, value }) => {
+                              .map(({ source, key, value }) => {
                                 const delivery = deliveryMap?.get(key);
                                 return (
                                   <Typography
@@ -2628,8 +2634,7 @@ export default function TerminologyPlayground({
                                     )}
                                   </Typography>
                                 );
-                              }
-                            )}
+                              })}
                             {aiTestState.glossaryEntries.length >
                               DISPLAY_LIMIT && (
                               <Button
@@ -3059,8 +3064,7 @@ export default function TerminologyPlayground({
                             0,
                             aiGlossaryExpanded ? undefined : DISPLAY_LIMIT
                           )
-                          .map(
-                          ({ source, key, value }) => {
+                          .map(({ source, key, value }) => {
                             const sourceLabel =
                               source === "input"
                                 ? i18n(
@@ -3177,8 +3181,7 @@ export default function TerminologyPlayground({
                                 </td>
                               </tr>
                             );
-                          }
-                        )}
+                          })}
                       </tbody>
                     </table>
                     {aiTestState.glossaryEntries.length > DISPLAY_LIMIT && (

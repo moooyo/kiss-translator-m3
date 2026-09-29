@@ -154,7 +154,8 @@ export class WordTooltipController {
     this.i18n = i18n;
     this.onVisibilityChange = onVisibilityChange;
     this.tooltipEl = null;
-    this.hoverTimeout = null;
+    this.openTimeout = null;
+    this.hideTimeout = null;
     this.activeWordEl = null;
     this.tooltipHovered = false;
     this.destroyed = false;
@@ -162,6 +163,7 @@ export class WordTooltipController {
 
   attachSpanListeners(root, getTimestamp = this.getTimestamp) {
     if (!root) return;
+    this.reconcileActiveWord();
 
     const spans = root.querySelectorAll(".kiss-subtitle-word");
     spans.forEach((span) => {
@@ -180,10 +182,17 @@ export class WordTooltipController {
     this.clearHoverState();
   }
 
-  #cancelHoverTimer() {
-    if (this.hoverTimeout !== null) {
-      clearTimeout(this.hoverTimeout);
-      this.hoverTimeout = null;
+  #cancelOpenTimer() {
+    if (this.openTimeout !== null) {
+      clearTimeout(this.openTimeout);
+      this.openTimeout = null;
+    }
+  }
+
+  #cancelHideTimer() {
+    if (this.hideTimeout !== null) {
+      clearTimeout(this.hideTimeout);
+      this.hideTimeout = null;
     }
   }
 
@@ -194,14 +203,14 @@ export class WordTooltipController {
   }
 
   #scheduleHideTooltip() {
-    this.#cancelHoverTimer();
+    this.#cancelHideTimer();
     if (this.destroyed || this.tooltipHovered || this.#hasTooltipFocus())
       return;
     // Allow travel from the subtitles to the tooltip across the player.
-    this.hoverTimeout = setTimeout(() => {
-      this.hoverTimeout = null;
+    this.hideTimeout = setTimeout(() => {
+      this.hideTimeout = null;
       if (
-        !this.activeWordEl &&
+        !this.activeWordEl?.isConnected &&
         !this.tooltipHovered &&
         !this.#hasTooltipFocus()
       ) {
@@ -211,10 +220,24 @@ export class WordTooltipController {
   }
 
   clearHoverState() {
-    this.#cancelHoverTimer();
+    this.#cancelOpenTimer();
     this.activeWordEl?.classList.remove("kiss-word-hover");
     this.activeWordEl = null;
     this.hideWordTooltip();
+  }
+
+  releaseActiveWord() {
+    this.#cancelOpenTimer();
+    this.activeWordEl?.classList.remove("kiss-word-hover");
+    this.activeWordEl = null;
+    this.#scheduleHideTooltip();
+  }
+
+  reconcileActiveWord() {
+    // Replacing captions does not reliably dispatch pointerleave on old spans.
+    if (this.activeWordEl && !this.activeWordEl.isConnected) {
+      this.releaseActiveWord();
+    }
   }
 
   #handleWordHover(event, getTimestamp) {
@@ -222,13 +245,16 @@ export class WordTooltipController {
     if (this.destroyed || !target.classList.contains("kiss-subtitle-word"))
       return;
 
-    this.#cancelHoverTimer();
+    this.#cancelOpenTimer();
+    this.#cancelHideTimer();
 
+    this.activeWordEl?.classList.remove("kiss-word-hover");
     target.classList.add("kiss-word-hover");
     this.activeWordEl = target;
 
-    this.hoverTimeout = setTimeout(() => {
-      this.hoverTimeout = null;
+    this.openTimeout = setTimeout(() => {
+      this.openTimeout = null;
+      if (!target.isConnected || this.activeWordEl !== target) return;
       this.showWordTooltip(target.dataset.word, {
         timestamp: getTimestamp?.() ?? 0,
       });
@@ -242,15 +268,14 @@ export class WordTooltipController {
 
     target.classList.remove("kiss-word-hover");
     if (this.activeWordEl === target) {
-      this.activeWordEl = null;
+      this.releaseActiveWord();
     }
-
-    this.#scheduleHideTooltip();
   }
 
   async showWordTooltip(word, { timestamp = 0 } = {}) {
     if (this.destroyed) return;
-    this.#cancelHoverTimer();
+    this.#cancelOpenTimer();
+    this.#cancelHideTimer();
     const wasVisible = Boolean(this.tooltipEl);
     if (this.tooltipEl) {
       this.tooltipEl.remove();
@@ -265,13 +290,13 @@ export class WordTooltipController {
     );
     tooltipEl.addEventListener("pointerenter", () => {
       this.tooltipHovered = true;
-      this.#cancelHoverTimer();
+      this.#cancelHideTimer();
     });
     tooltipEl.addEventListener("pointerleave", () => {
       this.tooltipHovered = false;
       this.#scheduleHideTooltip();
     });
-    tooltipEl.addEventListener("focusin", () => this.#cancelHoverTimer());
+    tooltipEl.addEventListener("focusin", () => this.#cancelHideTimer());
     tooltipEl.addEventListener("focusout", (event) => {
       if (!tooltipEl.contains(event.relatedTarget)) this.#scheduleHideTooltip();
     });
@@ -351,7 +376,7 @@ export class WordTooltipController {
   }
 
   hideWordTooltip() {
-    this.#cancelHoverTimer();
+    this.#cancelHideTimer();
     this.tooltipHovered = false;
     if (this.tooltipEl) {
       this.tooltipEl.remove();

@@ -33,6 +33,7 @@ export class BilingualSubtitleManager {
   #captionHovered = false;
   #tooltipVisible = false;
   #pausedForLookup = false;
+  #lookupPauseRequestedAt = 0;
   #destroyed = false;
   #playerControlBarObserver = null; // 监听播放器底部控制条显隐突变的 MutationObserver
   #playerResizeObserver = null; // 记住位置时监听播放器尺寸变化
@@ -136,7 +137,15 @@ export class BilingualSubtitleManager {
   }
 
   // A user-initiated play transfers playback ownership back to the player.
-  #handleVideoPlay = () => {
+  #handleVideoPlay = (event) => {
+    // Chromium timestamps queued media events before dispatching them.
+    if (
+      this.#pausedForLookup &&
+      this.#videoEl.paused &&
+      event.timeStamp <= this.#lookupPauseRequestedAt
+    ) {
+      return;
+    }
     this.#pausedForLookup = false;
   };
 
@@ -319,6 +328,7 @@ export class BilingualSubtitleManager {
           this.#captionHovered = true;
           if (!this.#videoEl.paused && !this.#videoEl.ended) {
             this.#pausedForLookup = true;
+            this.#lookupPauseRequestedAt = performance.now();
             this.#videoEl.pause();
           }
         }

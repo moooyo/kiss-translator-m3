@@ -126,6 +126,72 @@ describe("subtitle dictionary tooltip interaction", () => {
     expect(tooltip()).toBeNull();
   });
 
+  test("opens the next word when leaving a focused tooltip during its opening delay", async () => {
+    const card = await hoverWord();
+    pointer(words[0], "pointerleave");
+    card.querySelector(".kiss-favorite-word-button").focus();
+
+    pointer(words[1], "pointerenter");
+    jest.advanceTimersByTime(100);
+    document.querySelector("#outside").focus();
+    jest.advanceTimersByTime(200);
+    await flushPromises();
+
+    expect(apiMicrosoftDict.mock.calls).toEqual([["ready"], ["steady"]]);
+    expect(tooltip().textContent).toContain("steady");
+    jest.advanceTimersByTime(500);
+    expect(tooltip()).not.toBeNull();
+  });
+
+  test("dismisses a tooltip after its word is replaced without pointerleave", async () => {
+    const card = await hoverWord();
+    const captions = document.querySelector("#captions");
+    captions.innerHTML = wrapWordsWithSpans("updated captions");
+    controller.attachSpanListeners(captions);
+
+    expect(controller.activeWordEl).toBeNull();
+    expect(words[0].classList.contains("kiss-word-hover")).toBe(false);
+    jest.advanceTimersByTime(499);
+    expect(tooltip()).toBe(card);
+    jest.advanceTimersByTime(1);
+    expect(tooltip()).toBeNull();
+  });
+
+  test.each(["pointer", "focus"])(
+    "keeps an active tooltip usable during caption replacement with %s interaction",
+    async (interaction) => {
+      const card = await hoverWord();
+      if (interaction === "pointer") pointer(card, "pointerenter");
+      else card.querySelector(".kiss-favorite-word-button").focus();
+      const captions = document.querySelector("#captions");
+      captions.innerHTML = wrapWordsWithSpans("updated captions");
+      controller.attachSpanListeners(captions);
+      jest.advanceTimersByTime(1000);
+
+      expect(tooltip()).toBe(card);
+      card.querySelector(".kiss-favorite-word-button").click();
+      await flushPromises();
+      expect(favorites.ready).toBeDefined();
+
+      if (interaction === "pointer") pointer(card, "pointerleave");
+      else document.querySelector("#outside").focus();
+      jest.advanceTimersByTime(500);
+      expect(tooltip()).toBeNull();
+    }
+  );
+
+  test("cancels a pending lookup when its word is replaced", () => {
+    pointer(words[0], "pointerenter");
+    jest.advanceTimersByTime(100);
+    const captions = document.querySelector("#captions");
+    captions.innerHTML = wrapWordsWithSpans("updated captions");
+    controller.attachSpanListeners(captions);
+    jest.advanceTimersByTime(1000);
+
+    expect(apiMicrosoftDict).not.toHaveBeenCalled();
+    expect(tooltip()).toBeNull();
+  });
+
   test.each(["success", "empty", "failure"])(
     "closes a %s lookup through a real button listener",
     async (outcome) => {

@@ -150,8 +150,7 @@ export function detectTermConflicts(parsedTerms, options = {}) {
 
   const conflicts = [];
   const seen = new Set(); // 去重："shortKey:longKey"
-  // per-call 编译缓存：单次 detectTermConflicts 内对同一 pattern 不重复编译
-  // （跨击键的 WeakMap 记忆化由 termConflictsCache 承担，二者互补）。
+  // Cache each key's classification and compiled regex once per analysis.
   const strictCache = new Map();
   const regexCache = new Map();
 
@@ -224,18 +223,10 @@ function termHitsKey(term, targetKey, caches, treatKeysAsLiteral = false) {
   // 字面匹配模式：key 原文不按正则解释，子串未命中即不冲突
   if (treatKeysAsLiteral) return false;
 
-  const strictPairKey = `${term.key}\u0000${targetKey}`;
-  if (caches?.strictCache) {
-    const cachedStrict = caches.strictCache.get(strictPairKey);
-    if (cachedStrict === true) return false; // true = 双方严格字面量，正则路径不可能命中
-    if (cachedStrict === undefined) {
-      caches.strictCache.set(
-        strictPairKey,
-        isStrictLiteralPattern(term.key) && isStrictLiteralPattern(targetKey)
-      );
-    }
-  }
-  if (isStrictLiteralPattern(term.key) && isStrictLiteralPattern(targetKey)) {
+  if (
+    isStrictLiteralKey(term.key, caches?.strictCache) &&
+    isStrictLiteralKey(targetKey, caches?.strictCache)
+  ) {
     return false;
   }
 
@@ -275,6 +266,14 @@ function termHitsKey(term, targetKey, caches, treatKeysAsLiteral = false) {
   }
 
   return false;
+}
+
+function isStrictLiteralKey(key, cache) {
+  const cached = cache?.get(key);
+  if (cached !== undefined) return cached;
+  const strict = isStrictLiteralPattern(key);
+  cache?.set(key, strict);
+  return strict;
 }
 
 // ─── 测试文本生成 ────────────────────────────────────────────────────────────
@@ -327,7 +326,8 @@ export function generateTermTestText(parsedTerms, seed = "", options = {}) {
   // 内部自算时透传字面模式：treatKeysAsLiteral 语义必须同时覆盖冲突分析与
   // 样例生成，否则调用方只传字面选项而不传 conflicts 时会拿到正则语义冲突集。
   const conflicts =
-    options?.conflicts ?? detectTermConflicts(parsedTerms, { treatKeysAsLiteral });
+    options?.conflicts ??
+    detectTermConflicts(parsedTerms, { treatKeysAsLiteral });
   for (const conflict of conflicts) {
     const { short, long, shortHasValue, longHasValue } = conflict;
     const shortSample = resolveSample(short.key);
@@ -378,7 +378,10 @@ export function generateTermTestText(parsedTerms, seed = "", options = {}) {
   // 2. 无冲突术语的单术语用例
   const conflictKeys = new Set();
   for (const c of conflicts) {
-    if (resolveSample(c.short.key) === null || resolveSample(c.long.key) === null) {
+    if (
+      resolveSample(c.short.key) === null ||
+      resolveSample(c.long.key) === null
+    ) {
       continue;
     }
     if (
@@ -674,16 +677,17 @@ export function assertTermReplacements(parsedTerms, testCase, options = {}) {
       for (const ls of longSpans) {
         if (longHasValue) {
           // 类型 1/3: 长词应有译文
-          if (ls.replacement === text.slice(ls.start, ls.end)) {
+          if (ls.replacement !== long.value) {
             issues.push({
               type: `conflict-type-${conflictType}`,
               messageKey: "conflict-long-value-not-applied",
               params: { long: long.key },
-              message: `长词 ${long.key} 有译文但未被替换（仍为原文）`,
+              message: `The long term ${long.key} did not use its configured replacement`,
               detail: {
                 conflictType,
                 long: { key: long.key, value: long.value },
                 longSpan: ls,
+                expectedReplacement: long.value,
                 text,
                 spans,
                 fixedOutput: fixed.output,
@@ -723,16 +727,17 @@ export function assertTermReplacements(parsedTerms, testCase, options = {}) {
       if (insideLong) continue; // 已在断言 2 中处理
 
       if (shortHasValue) {
-        if (ss.replacement === text.slice(ss.start, ss.end)) {
+        if (ss.replacement !== short.value) {
           issues.push({
             type: `conflict-type-${conflictType}`,
             messageKey: "conflict-short-value-not-applied",
             params: { short: short.key },
-            message: `短词 ${short.key} 有译文但未被替换（单独出现时）`,
+            message: `The short term ${short.key} did not use its configured replacement`,
             detail: {
               conflictType,
               short: { key: short.key, value: short.value },
               shortSpan: ss,
+              expectedReplacement: short.value,
               text,
               spans,
               fixedOutput: fixed.output,

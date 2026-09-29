@@ -703,6 +703,7 @@ describe("draft multi-tab race and unload flush (M3/B1)", () => {
     // touched），故先以一次非空 newValue 广播把 touched 置 true，再验证 null 广播不回退。
     const fourth = mountView();
     await openTermsTab(fourth.host);
+    window.localStorage.setItem(TERMS_KEY, "edited");
     act(() => {
       window.dispatchEvent(
         new StorageEvent("storage", { key: TERMS_KEY, newValue: "edited" })
