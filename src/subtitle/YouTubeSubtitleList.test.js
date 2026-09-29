@@ -60,6 +60,9 @@ function renderVisibleSubtitleItems(manager) {
     configurable: true,
   });
   manager._renderVirtualSubtitles(true);
+  // Settle the measurement redraw before dispatching pointer events.
+  manager._cancelVirtualRender();
+  manager._renderVirtualSubtitles(true);
 }
 
 async function flushPromises() {
@@ -315,7 +318,7 @@ describe("YouTubeSubtitleList", () => {
     );
   });
 
-  test("clears word tooltip when the subtitle list scrolls away from the hovered word", async () => {
+  test("dismisses an inactive tooltip after scrolling with time to reach the card", async () => {
     jest.useFakeTimers();
     apiMicrosoftDict.mockResolvedValue({
       trs: [{ pos: "adj.", def: "准备好的" }],
@@ -340,9 +343,87 @@ describe("YouTubeSubtitleList", () => {
 
     manager.subtitleScrollContainer.dispatchEvent(new Event("scroll"));
 
-    expect(document.querySelector(".kiss-word-tooltip")).toBeNull();
     expect(word.classList.contains("kiss-word-hover")).toBe(false);
+    expect(document.querySelector(".kiss-word-tooltip")).not.toBeNull();
+    jest.advanceTimersByTime(500);
+    expect(document.querySelector(".kiss-word-tooltip")).toBeNull();
 
+    manager.destroy();
+  });
+
+  test.each(["pointer", "focus"])(
+    "suspends automatic follow while the lookup card has %s interaction",
+    async (interaction) => {
+      jest.useFakeTimers();
+      apiMicrosoftDict.mockResolvedValue({ trs: [{ def: "Ready for use" }] });
+      const videoEl = createVideoElement();
+      Object.defineProperty(videoEl, "paused", { value: false });
+      const manager = new YouTubeSubtitleList(videoEl, () => "", {
+        enableHoverLookup: true,
+      });
+      manager.initialize(
+        [subtitle, { ...subtitle, start: 1000, end: 2000 }],
+        [],
+        100
+      );
+      renderVisibleSubtitleItems(manager);
+      const scroll = jest.spyOn(manager, "_scrollIndexIntoView");
+      manager.container.dispatchEvent(new Event("mouseenter"));
+      const word = document.querySelector(".kiss-subtitle-word");
+      word.dispatchEvent(new Event("pointerenter"));
+      jest.advanceTimersByTime(300);
+      await flushPromises();
+      const card = document.querySelector(".kiss-word-tooltip");
+      word.dispatchEvent(new Event("pointerleave"));
+      manager.container.dispatchEvent(new Event("mouseleave"));
+      if (interaction === "pointer")
+        card.dispatchEvent(new Event("pointerenter"));
+      else card.querySelector(".kiss-favorite-word-button").focus();
+      videoEl.currentTime = 1.5;
+      videoEl.dispatchEvent(new Event("play"));
+      // A previously queued scroll must not dismiss an engaged card.
+      manager.subtitleScrollContainer.dispatchEvent(new Event("scroll"));
+      jest.advanceTimersByTime(1000);
+
+      expect(scroll).not.toHaveBeenCalled();
+      expect(card.isConnected).toBe(true);
+      card.querySelector(".kiss-favorite-word-button").click();
+      await flushPromises();
+      expect(favoriteWords.hello).toBeDefined();
+
+      if (interaction === "pointer")
+        card.dispatchEvent(new Event("pointerleave"));
+      else card.querySelector(".kiss-favorite-word-button").blur();
+      jest.advanceTimersByTime(700);
+      expect(card.isConnected).toBe(false);
+      expect(scroll).toHaveBeenCalledWith(1);
+      manager.destroy();
+      expect(manager.loopAutoScroll).toBeNull();
+    }
+  );
+
+  test("keeps follow suspended inside the sidebar when its tooltip closes", async () => {
+    jest.useFakeTimers();
+    apiMicrosoftDict.mockResolvedValue({ trs: [{ def: "A greeting" }] });
+    const videoEl = createVideoElement();
+    Object.defineProperty(videoEl, "paused", { value: false });
+    const manager = new YouTubeSubtitleList(videoEl, () => "", {
+      enableHoverLookup: true,
+    });
+    manager.initialize([subtitle]);
+    renderVisibleSubtitleItems(manager);
+    manager.container.dispatchEvent(new Event("mouseenter"));
+    document
+      .querySelector(".kiss-subtitle-word")
+      .dispatchEvent(new Event("pointerenter"));
+    jest.advanceTimersByTime(300);
+    await flushPromises();
+    document.querySelector(".kiss-word-tooltip-close").click();
+    videoEl.dispatchEvent(new Event("play"));
+
+    expect(manager.loopAutoScroll).toBeNull();
+    manager.container.dispatchEvent(new Event("mouseleave"));
+    expect(manager.loopAutoScroll).not.toBeNull();
     manager.destroy();
   });
 

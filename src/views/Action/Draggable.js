@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useState, useRef, useCallback } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  useRef,
+  useCallback,
+} from "react";
 import { limitFloat, limitNumber } from "../../libs/utils";
 import { isMobile } from "../../libs/mobile";
 import { putFab } from "../../libs/storage";
@@ -6,6 +13,13 @@ import { debounce } from "../../libs/utils";
 import Paper from "@mui/material/Paper";
 
 const FAB_EDGES = ["left", "right", "top", "bottom"];
+
+// Ignore only floating-point roundoff from proportional coordinate conversion.
+const samePixelCoordinate = (previous, next) =>
+  Number.isFinite(previous) &&
+  Number.isFinite(next) &&
+  Math.abs(previous - next) <=
+    Number.EPSILON * 2 * Math.max(1, Math.abs(previous), Math.abs(next));
 
 // Find the viewport edge nearest to the current position.
 export const getNearestEdge = ({
@@ -120,6 +134,9 @@ export default function Draggable({
   );
   const containerRef = useRef(null);
   const draggedRef = useRef(false);
+  // Set by applyTransform on its first invocation; the transition-gating
+  // probe waits for it so the initial paint never animates the transform.
+  const hasAppliedPositionRef = useRef(false);
   const revealed = hover || focusWithin || expanded || Boolean(origin);
 
   // Store proportional positions so they scale with viewport changes.
@@ -133,12 +150,38 @@ export default function Draggable({
     x: left / windowWidth,
     y: top / windowHeight,
   });
-  // Debounce storage updates for the latest drag position.
-  const setFabPosition = useMemo(() => debounce(putFab, 500), []);
+  const lastRequestedFabPosition = useRef({
+    x: left,
+    y: top,
+    edge: savedEdge,
+  });
+  // Storage uses pixels, while React state uses viewport proportions. Compare
+  // the final debounced request so a resize or an already-snapped drag saves
+  // its new coordinates, but returning to the saved position does not write.
+  const setFabPosition = useMemo(
+    () =>
+      debounce((nextPosition) => {
+        const previous = lastRequestedFabPosition.current;
+        if (
+          samePixelCoordinate(previous.x, nextPosition.x) &&
+          samePixelCoordinate(previous.y, nextPosition.y) &&
+          previous.edge === nextPosition.edge
+        ) {
+          return;
+        }
+        lastRequestedFabPosition.current = nextPosition;
+        putFab(nextPosition);
+      }, 500),
+    []
+  );
 
   // Apply the current position directly to the container.
   const applyTransform = useCallback((x, y) => {
     if (containerRef.current) {
+      // Marked inside the same branch as the transform write: on mount the
+      // container always exists, so the probe sees the flag as soon as the
+      // first real position has landed.
+      hasAppliedPositionRef.current = true;
       containerRef.current.style.transform = `translate(${x}px, ${y}px)`;
     }
   }, []);
@@ -186,7 +229,12 @@ export default function Draggable({
   }, [applyTransform, height, revealed, snapEdge, width]);
 
   // Snap to the locked edge and persist the resulting position.
-  useEffect(() => {
+  // Runs as a layout effect (not a passive effect): on mount this is the only
+  // path that writes the initial transform, so it must finish synchronously
+  // before the browser paints the first frame. A passive useEffect runs after
+  // the first paint, which lets the fixed top:0/left:0 container flash at the
+  // viewport origin before its saved position lands (#1116, PR #1117 review).
+  useLayoutEffect(() => {
     if (!snapEdge || !!origin) {
       return;
     }
@@ -226,7 +274,14 @@ export default function Draggable({
       x: edgePosition.x / windowWidth,
       y: edgePosition.y / windowHeight,
     };
-    setPosition(percentageEdge);
+    // Deduplicate React updates separately from pixel-based persistence.
+    const unchanged =
+      activeEdge === edge &&
+      percentageEdge.x === position.x &&
+      percentageEdge.y === position.y;
+    if (!unchanged) {
+      setPosition(percentageEdge);
+    }
     setFabPosition({ ...edgePosition, edge: activeEdge });
   }, [
     edge,
@@ -243,8 +298,24 @@ export default function Draggable({
     applyTransform,
   ]);
 
+  // Enable the transform transition only after the first positional transform
+  // has been applied, so the initial paint lands on the saved position without
+  // flying in from the viewport origin. The probe polls once per animation
+  // frame; the frame cap keeps the reveal animation available even when
+  // requestAnimationFrame is throttled. Cleanup cancels any pending frame.
   useEffect(() => {
-    setPositionTransitionEnabled(true);
+    let frame = 0;
+    let rafId;
+    const enableWhenPositioned = () => {
+      if (hasAppliedPositionRef.current || frame >= 10) {
+        setPositionTransitionEnabled(true);
+        return;
+      }
+      frame += 1;
+      rafId = requestAnimationFrame(enableWhenPositioned);
+    };
+    rafId = requestAnimationFrame(enableWhenPositioned);
+    return () => cancelAnimationFrame(rafId);
   }, []);
 
   // Begin dragging and capture the initial coordinates.

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Box from "@mui/material/Box";
 import FormControlLabel from "@mui/material/FormControlLabel";
 import Switch from "@mui/material/Switch";
@@ -22,6 +22,10 @@ import { debounce } from "../../libs/utils";
 // --max-warnings=0 作门禁），不得下移回组件体。
 const LS_TERMS_KEY = "kt-playground-terms-draft";
 const LS_AITERMS_KEY = "kt-playground-aiterms-draft";
+// 例句轮换 seed 的持久化键（刷新后轮换状态不丢失，M3）。
+const LS_TERM_SEED_KEY = "kt-playground-term-seed";
+// 双 Tab 草稿竞态防护涉及的全部持久化键（B1）。
+const DRAFT_STORAGE_KEYS = [LS_TERMS_KEY, LS_AITERMS_KEY, LS_TERM_SEED_KEY];
 // 文本翻译页签多选接口的持久化键（TranForm 内部读写，刷新/页签往返后回填）。
 const LS_API_SLUGS_KEY = "kt-playground-api-slugs";
 
@@ -64,7 +68,10 @@ export default function Playgound({ initialSettingsReady = true }) {
     return typeof draft === "string" && draft.trim() !== "";
   });
   // 例句轮换 seed（"" = 缺省确定性行为；切片按钮后递增轮换）。
-  const [termSeed, setTermSeed] = useState("");
+  // 持久化到 localStorage：刷新后轮换状态不丢失（M3）。
+  const [termSeed, setTermSeed] = useState(
+    () => readDraft(LS_TERM_SEED_KEY) ?? ""
+  );
   // AI 专业术语草稿：与 termsDraft 一样提升到父级，并持久化到 localStorage。
   const [aiTermsDraft, setAiTermsDraft] = useState(
     () => readDraft(LS_AITERMS_KEY) ?? ""
@@ -72,30 +79,106 @@ export default function Playgound({ initialSettingsReady = true }) {
 
   // 草稿变更防抖写入 localStorage（临时测试数据留存，不写入正式规则/接口配置）：
   // 逐键同步写盘在高频输入下产生过量 storage 写，200ms trailing 防抖合并为末值单次写。
+  // Keep timers stable: flushing reads refs, and reconciliation only depends on
+  // these same stable writers, so the mount-time callbacks remain current.
   const writeTermsDraft = useMemo(
     () =>
       debounce((v) => {
-        try {
-          window.localStorage.setItem(LS_TERMS_KEY, v);
-        } catch {
-          // localStorage 不可用时静默降级：仅丢失跨路由留存，不影响本页使用。
-        }
+        // 带竞态比对的写盘，并同步"自身最后已知 LS 值"（B1）。
+        flushDraftIfUnchanged(LS_TERMS_KEY, v);
       }, 200),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     []
   );
   const writeAiTermsDraft = useMemo(
     () =>
       debounce((v) => {
-        try {
-          window.localStorage.setItem(LS_AITERMS_KEY, v);
-        } catch {
-          // 同上，静默降级。
-        }
+        flushDraftIfUnchanged(LS_AITERMS_KEY, v);
       }, 200),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+  const writeTermSeed = useMemo(
+    () =>
+      debounce((v) => {
+        flushDraftIfUnchanged(LS_TERM_SEED_KEY, v);
+      }, 200),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     []
   );
   const termsDraftRef = useRef(termsDraft);
   const aiTermsDraftRef = useRef(aiTermsDraft);
+  const termSeedRef = useRef(termSeed);
+  const canInitializeTermsRef = useRef(!termDraftTouched);
+  const initializeTermsDraft = useCallback((value) => {
+    if (!canInitializeTermsRef.current) return;
+    canInitializeTermsRef.current = false;
+    termsDraftRef.current = value;
+    setTermsDraft(value);
+  }, []);
+  // 双 Tab 竞态防护（B1）：每个键的"自身最后已知 LS 值"。同步点覆盖：
+  // 初始读取（挂载 useState 初始化时读取的同值）、自身写盘、storage 事件。
+  // 卸载/兜底 flush 写盘前先比对当前 LS 值：仅当仍与自身最后已知值一致才写回，
+  // 防止后关闭的 Tab 用旧草稿覆盖另一 Tab 的新草稿。
+  const lastKnownValuesRef = useRef({
+    [LS_TERMS_KEY]: readDraft(LS_TERMS_KEY),
+    [LS_AITERMS_KEY]: readDraft(LS_AITERMS_KEY),
+    [LS_TERM_SEED_KEY]: readDraft(LS_TERM_SEED_KEY),
+  });
+
+  const reconcileDraft = useCallback(
+    (key, storedValue) => {
+      // Delayed notifications must not discard edits made after our last save.
+      if (storedValue === lastKnownValuesRef.current[key]) return;
+      lastKnownValuesRef.current[key] = storedValue;
+      const next = storedValue ?? "";
+      // Update refs before React commits so pagehide cannot restore stale data.
+      if (key === LS_TERMS_KEY) {
+        canInitializeTermsRef.current = false;
+        termsDraftRef.current = next;
+        writeTermsDraft.cancel();
+        setTermsDraft(next);
+        if (next.trim() !== "") setTermDraftTouched(true);
+      } else if (key === LS_AITERMS_KEY) {
+        aiTermsDraftRef.current = next;
+        writeAiTermsDraft.cancel();
+        setAiTermsDraft(next);
+      } else {
+        termSeedRef.current = next;
+        writeTermSeed.cancel();
+        setTermSeed(next);
+      }
+    },
+    [writeTermsDraft, writeAiTermsDraft, writeTermSeed]
+  );
+
+  // A rejected write also refreshes its baseline so later edits can be saved.
+  const flushDraftIfUnchanged = (key, value) => {
+    try {
+      const storedValue = window.localStorage.getItem(key);
+      if (storedValue !== lastKnownValuesRef.current[key]) {
+        reconcileDraft(key, storedValue);
+        return;
+      }
+      // 远端删除/清空后键在 LS 中已不存在：空草稿无需落盘，跳过写入以免
+      // 以空串重建键、覆盖另一 Tab 的删除意图。
+      if (value === "" && storedValue === null) {
+        return;
+      }
+      window.localStorage.setItem(key, value);
+      lastKnownValuesRef.current[key] = value;
+    } catch {
+      // localStorage 不可用时静默降级。
+    }
+  };
+
+  // 卸载/页面隐藏兜底时的三键同步 flush（M3：硬关页/刷新不触发 React 卸载，
+  // 防抖窗口内的尾字会丢；pagehide/beforeunload 时把 refs 中的最新值落盘）。
+  const flushAllDrafts = () => {
+    flushDraftIfUnchanged(LS_TERMS_KEY, termsDraftRef.current);
+    flushDraftIfUnchanged(LS_AITERMS_KEY, aiTermsDraftRef.current);
+    flushDraftIfUnchanged(LS_TERM_SEED_KEY, termSeedRef.current);
+  };
 
   // ref 同步并入 effect 体：渲染期零 ref 写。
   useEffect(() => {
@@ -106,27 +189,76 @@ export default function Playgound({ initialSettingsReady = true }) {
     aiTermsDraftRef.current = aiTermsDraft;
     writeAiTermsDraft(aiTermsDraft);
   }, [aiTermsDraft, writeAiTermsDraft]);
+  useEffect(() => {
+    termSeedRef.current = termSeed;
+    writeTermSeed(termSeed);
+  }, [termSeed, writeTermSeed]);
 
   // 卸载：先同步 flush 最终已提交值（不丢字，硬关闭/崩溃前的最后落盘），再
   // cancel 未决定时器（无幽灵写盘）。refs 由上方 effect 体在 commit 阶段更新，
-  // cleanup 运行时必为最新已提交值。
+  // cleanup 运行时必为最新已提交值。flush 前带 B1 竞态比对。
   useEffect(
     () => () => {
-      try {
-        window.localStorage.setItem(LS_TERMS_KEY, termsDraftRef.current);
-      } catch {
-        // 静默降级。
-      }
-      try {
-        window.localStorage.setItem(LS_AITERMS_KEY, aiTermsDraftRef.current);
-      } catch {
-        // 静默降级。
-      }
+      flushAllDrafts();
       writeTermsDraft.cancel();
       writeAiTermsDraft.cancel();
+      writeTermSeed.cancel();
     },
-    [writeTermsDraft, writeAiTermsDraft]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
   );
+
+  // 硬关页/刷新兜底（M3）：浏览器关闭/刷新不触发组件卸载 cleanup，
+  // pagehide/beforeunload 时同步落盘三键（B1 比对同样生效）。
+  useEffect(() => {
+    window.addEventListener("pagehide", flushAllDrafts);
+    window.addEventListener("beforeunload", flushAllDrafts);
+    return () => {
+      window.removeEventListener("pagehide", flushAllDrafts);
+      window.removeEventListener("beforeunload", flushAllDrafts);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Storage events invalidate the snapshot; their payload may already be stale.
+  useEffect(() => {
+    const onStorage = (event) => {
+      // 异源 storage 广播守卫：W3C 规范中 storageArea 指向被修改的 Storage
+      // 对象，另一 Tab 对同源 sessionStorage 的写入/清空也会广播到本 Tab
+      // （clear 广播 key 为 null），不校验来源会误触下方 clear/per-key 分支、
+      // 清空仅属 localStorage 草稿的本地内存态。
+      // storageArea 为 null（合成/旧式事件，无法判定来源）或恰为
+      // window.localStorage 时放行；非 null 且非 localStorage 一律忽略。
+      if (
+        event.storageArea !== null &&
+        event.storageArea !== window.localStorage
+      ) {
+        return;
+      }
+      if (event.key !== null && !DRAFT_STORAGE_KEYS.includes(event.key)) return;
+      const keys = event.key === null ? DRAFT_STORAGE_KEYS : [event.key];
+      for (const key of keys) {
+        try {
+          const storedValue = window.localStorage.getItem(key);
+          // A real deletion also cancels pending initialization of an empty draft.
+          if (
+            key === LS_TERMS_KEY &&
+            storedValue === null &&
+            (event.key === null || event.newValue === null)
+          ) {
+            canInitializeTermsRef.current = false;
+          }
+          reconcileDraft(key, storedValue);
+        } catch {
+          // Preserve the last usable snapshot when storage is unavailable.
+        }
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [reconcileDraft]);
   const i18n = useI18n();
   // 从全局钩子中读取设置
   const { setting } = useSetting();
@@ -264,6 +396,7 @@ export default function Playgound({ initialSettingsReady = true }) {
           setActiveTab={setActiveTab}
           termsDraft={termsDraft}
           setTermsDraft={setTermsDraft}
+          initializeTermsDraft={initializeTermsDraft}
           termDraftTouched={termDraftTouched}
           setTermDraftTouched={setTermDraftTouched}
           termSeed={termSeed}
